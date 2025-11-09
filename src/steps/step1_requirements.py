@@ -23,7 +23,7 @@ def run_step(state: Dict[str, Any], prompt_template_path: str, llm: LLMClient, r
     console = get_console()
     t0 = time.time()
     with console.status(f"[bold]Step 1[/bold]: contacting [cyan]{llm.model}[/cyan]…", spinner="dots"):
-        raw = llm.chat(messages)
+        raw, usage = llm.chat(messages)
     dt = time.time() - t0
     console.print(f":white_check_mark: Step 1 done in {dt:0.1f}s")
 
@@ -41,7 +41,7 @@ def run_step(state: Dict[str, Any], prompt_template_path: str, llm: LLMClient, r
             {"role": "system", "content": "You are a strict JSON converter. Return only valid minified JSON."},
             {"role": "user", "content": repair_user},
         ]
-        raw2 = llm.chat(repair_msgs, response_format={"type": "json_object"})
+        raw2, usage2 = llm.chat(repair_msgs, response_format={"type": "json_object"})
         obj = parse_loose_json(raw2)
 
     w = state["work"]
