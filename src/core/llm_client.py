@@ -16,6 +16,16 @@ from tenacity import (
     before_sleep_log
 )
 
+from openai import (
+    OpenAI,
+    APIError,
+    APIConnectionError,
+    RateLimitError,
+    APITimeoutError,
+    InternalServerError,
+    BadRequestError
+)
+
 from .run_state import TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -82,18 +92,66 @@ class LLMClient:
             f"temperature={self.temperature}, base_url={self.base_url or 'OpenAI cloud'}"
         )
     
+    @classmethod
+    def from_env(cls) -> LLMClient:
+        """
+        Create LLM client from environment variables.
+        
+        Reads configuration from:
+        - OPENAI_MODEL (default: "gpt-5")
+        - OPENAI_BASE_URL (optional)
+        - TEMP_DEFAULT (optional, default: 0.2)
+        - MAX_TOKENS (optional, default: 4096)
+        
+        Returns:
+            Configured LLMClient instance
+        """
+        model = os.getenv("OPENAI_MODEL", "gpt-5")
+        base_url = os.getenv("OPENAI_BASE_URL")
+        
+        # Temperature from env
+        env_temp = os.getenv("TEMP_DEFAULT", "")
+        temperature = float(env_temp) if env_temp not in ("", None) else 0.2
+        
+        # Max tokens from env
+        max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
+        
+        return cls(
+            model=model,
+            base_url=base_url,
+            # temperature=temperature,
+            # max_tokens=max_tokens
+        )
+    
+    def call(self, prompt: str) -> str:
+        """
+        Simple call method for single prompt.
+        Wraps chat() for convenience.
+        
+        Args:
+            prompt: User prompt string
+            
+        Returns:
+            Response text
+        """
+        messages = [{"role": "user", "content": prompt}]
+        response, _ = self.chat(messages)
+        return response
+    
     @retry(
-        retry=retry_if_exception_type((APIConnectionError, RateLimitError, APIError)),
-        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((APIConnectionError, APITimeoutError, InternalServerError)),
+        stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        before_sleep=before_sleep_log(logger, logging.WARNING)
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
     )
+
     def chat(
         self,
         messages: List[Dict[str, str]],
-        response_format: Dict[str, Any] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None
+        response_format: Dict[str, Any] | None = None
+        # temperature: float | None = None,
+        # max_tokens: int | None = None
     ) -> tuple[str, TokenUsage | None]:
         """
         Send chat completion request to LLM.
@@ -117,13 +175,13 @@ class LLMClient:
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens or self.max_tokens,
+            # "max_tokens": max_tokens or self.max_tokens,
         }
         
         # Use provided temperature or instance default
-        temp = temperature if temperature is not None else self.temperature
-        if temp is not None:
-            kwargs["temperature"] = temp
+        # temp = temperature if temperature is not None else self.temperature
+        # if temp is not None:
+        #     kwargs["temperature"] = temp
         
         # JSON mode for OpenAI cloud; many local servers ignore/404 on this
         if _is_openai_cloud(self.base_url):
@@ -220,81 +278,4 @@ class LLMClient:
             "total_tokens_used": self.total_tokens_used,
             "model": self.model,
             "base_url": self.base_url or "OpenAI cloud"
-        }
-
-
-class MockLLMClient:
-    """
-    Mock LLM client for testing and dry-run mode.
-    
-    Returns predefined responses without making actual API calls.
-    """
-    
-    def __init__(self, model: str = "mock-model", temperature: float = 0.0):
-        self.model = model
-        self.temperature = temperature
-        self.total_calls = 0
-        self.total_tokens_used = 0
-        logger.info("MockLLMClient initialized (no actual API calls will be made)")
-    
-    def chat(
-        self,
-        messages: List[Dict[str, str]],
-        response_format: Dict[str, Any] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None
-    ) -> tuple[str, TokenUsage | None]:
-        """Return mock response."""
-        self.total_calls += 1
-        
-        # Generate a mock response based on the last message
-        last_message = messages[-1]["content"] if messages else ""
-        
-        # Create a minimal valid JSON response
-        mock_response = """{
-            "assumptions": ["Mock assumption 1", "Mock assumption 2"],
-            "decisions": ["Mock decision 1"],
-            "open_questions": ["Mock question 1"],
-            "entities": [
-                {
-                    "name": "MockEntity",
-                    "definition": "A mock entity for testing",
-                    "is_core": true,
-                    "notes": "Generated by MockLLMClient"
-                }
-            ],
-            "core_functional_map": [
-                {
-                    "component": "Mock Component",
-                    "scope": "Testing",
-                    "rationale": "For testing purposes"
-                }
-            ],
-            "reference_sets": [],
-            "confidence": {
-                "tab": "Entities",
-                "score": 8
-            }
-        }"""
-        
-        # Mock token usage
-        token_usage = TokenUsage(
-            prompt_tokens=len(last_message) // 4,  # Rough estimate
-            completion_tokens=len(mock_response) // 4,
-            total_tokens=(len(last_message) + len(mock_response)) // 4
-        )
-        
-        self.total_tokens_used += token_usage.total_tokens
-        
-        logger.info(f"MockLLMClient returned mock response (call #{self.total_calls})")
-        
-        return mock_response, token_usage
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get mock statistics."""
-        return {
-            "total_calls": self.total_calls,
-            "total_tokens_used": self.total_tokens_used,
-            "model": self.model + " (mock)",
-            "base_url": "mock"
         }

@@ -1,0 +1,40 @@
+{
+  "cdm": {
+    "domain": "Plan and Benefit",
+    "description": "Insurance plan structures and benefit designs for PBM passthrough model"
+  },
+  "inputs": {
+    "fhir": [
+      "inputs/FHIR_coverage.profile.json",
+      "inputs/FHIR_Coverage-Coverage1.json",
+      "inputs/FHIR_Coverage-Coverage2.json",
+      "inputs/FHIR_Coverage-Coverage3.json",
+      "inputs/FHIR_Coverage-CoverageDental1.json",
+      "inputs/FHIR_coverage-example.json",
+      "inputs/FHIR_coverage-example-2.json",
+      "inputs/FHIR_coverage-example-ehic.json",
+      "inputs/FHIR_coverage-example-selfpay.json",
+      "inputs/FHIR_insuranceplan.profile.json",
+      "inputs/FHIR_insuranceplan-example.json",
+      "inputs/FHIR_insuranceproduct.profile.json",
+      "inputs/FHIR_insuranceproduct-example.json"
+    ],
+    "guardrails": [
+      "inputs/GR_Navitus_DGBee_Hierarchy_Benefit_Modernization_API.xlsx",
+      "inputs/GR_Navitus_DGBee_v1.0_BenefitSetupSvc_Gen1_API.xlsx",
+      "inputs/GR_Navitus_DGBee_v1.0_Hierarchy_Gen1_API.xlsx",
+      "inputs/GR_Navitus_DGBee_v1.5_Plan and Benefit__Hierarchy_API.xlsx",
+      "inputs/GR_P&B_APIs_Data_Governance.xlsx"
+    ],
+    "ddl": [
+      "inputs/DDL_plan_bpm_tables.json"
+    ],
+    "naming_standard": [
+      "inputs/STNDRD_Enterprise Data Field Naming Standard.xlsx"
+    ]
+  },
+  "output": {
+    "directory": "output/plan_and_benefit",
+    "filename": "Plan_and_Benefit_CDM.xlsx"
+  }
+}

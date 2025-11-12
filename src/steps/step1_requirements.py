@@ -1,56 +1,175 @@
-from __future__ import annotations
-import json
-from typing import Dict, Any
+"""
+Step 1: Requirements Gathering
+Enhanced to accept JSON inputs from various sources
+"""
 from pathlib import Path
-from ..core.llm_client import LLMClient
-from ..core.context_header import build_context_header
-from ..core.standard_loader import naming_rules_snippet
-from ..core.logging_utils import append_runlog
-from ..core.ui import get_console   # ← add this import near the top
-from ..core.json_sanitizer import parse_loose_json
-import time             
+from typing import Dict, Optional
+from src.core.llm_client import LLMClient
+from src.core.run_state import RunState
 
-def run_step(state: Dict[str, Any], prompt_template_path: str, llm: LLMClient, runlog_path: str) -> Dict[str, Any]:
-    template = Path(prompt_template_path).read_text(encoding="utf-8")
-    filled = template.replace("{{CONTEXT_HEADER}}", build_context_header(state)) \
-                     .replace("{{NAMING_RULES_SNIPPET}}", naming_rules_snippet(state["naming_rules"]))
 
-    messages = [
-        {"role": "system", "content": "You are a precise CDM architect. Always return strict JSON as instructed."},
-        {"role": "user", "content": filled},
-    ]
-
-    console = get_console()
-    t0 = time.time()
-    with console.status(f"[bold]Step 1[/bold]: contacting [cyan]{llm.model}[/cyan]…", spinner="dots"):
-        raw, usage = llm.chat(messages)
-    dt = time.time() - t0
-    console.print(f":white_check_mark: Step 1 done in {dt:0.1f}s")
-
-    append_runlog(runlog_path, {"step": 1, "prompt_chars": len(filled), "response_chars": len(raw)})
-
-    try:
-        obj = parse_loose_json(raw)
-    except Exception:
-        # One-shot repair prompt: ask the model to convert its own output to strict JSON
-        repair_user = (
-            "Convert the following content into STRICT JSON matching the schema from the prior instructions. "
-            "Return ONLY JSON, no code fences, no commentary:\n\n" + raw[:8000]
-        )
-        repair_msgs = [
-            {"role": "system", "content": "You are a strict JSON converter. Return only valid minified JSON."},
-            {"role": "user", "content": repair_user},
-        ]
-        raw2, usage2 = llm.chat(repair_msgs, response_format={"type": "json_object"})
-        obj = parse_loose_json(raw2)
-
-    w = state["work"]
-    w["assumptions"]        = sorted(set(w["assumptions"] + obj.get("assumptions", [])))
-    w["decisions"]          = w["decisions"] + obj.get("decisions", [])
-    w["open_questions"]     = w["open_questions"] + obj.get("open_questions", [])
-    w["entities"]           = obj.get("entities", [])
-    w["core_functional_map"]= obj.get("core_functional_map", [])
-    w["reference_sets"]     = obj.get("reference_sets", [])
-    if "confidence" in obj and obj["confidence"].get("tab") == "Entities":
-        w["confidence"]["per_tab"]["Entities"] = obj["confidence"].get("score")
+def run_step1(
+    domain: str,
+    inputs_json: Dict[str, str],
+    llm: LLMClient,
+    outdir: str
+) -> RunState:
+    """
+    Step 1: Gather requirements for CDM generation.
+    
+    Args:
+        domain: CDM domain name (e.g., "Plan and Benefit")
+        inputs_json: Dictionary of JSON strings from input files
+                    Keys: 'fhir', 'guardrails', 'ddl', 'naming_standard'
+        llm: LLM client instance
+        outdir: Output directory
+        
+    Returns:
+        RunState object with results
+    """
+    # Build prompt with JSON inputs
+    prompt = _build_requirements_prompt(domain, inputs_json)
+    
+    print(f"Calling LLM for requirements gathering...")
+    print(f"  Prompt length: {len(prompt)} characters")
+    
+    # Call LLM
+    response = llm.call(prompt)
+    
+    # Save output
+    output_file = Path(outdir) / f"step1_requirements_{domain.replace(' ', '_')}.md"
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(response)
+    
+    # Create run state
+    state = RunState(
+        domain=domain,
+        step=1,
+        prompt=prompt,
+        response=response,
+        output_file=str(output_file),
+        metadata={
+            'inputs_provided': list(inputs_json.keys()),
+            'has_fhir': 'fhir' in inputs_json,
+            'has_guardrails': 'guardrails' in inputs_json,
+            'has_ddl': 'ddl' in inputs_json,
+            'has_naming_standard': 'naming_standard' in inputs_json
+        }
+    )
+    
     return state
+
+
+def _build_requirements_prompt(domain: str, inputs_json: Dict[str, str]) -> str:
+    """
+    Build requirements gathering prompt with JSON inputs.
+    
+    Includes base Prompt 1 template plus JSON data from input files.
+    """
+    # Base prompt from original Prompt 1
+    base_prompt = f"""You are a senior data architect at a Pharmacy Benefit Manager (PBM) that operates primarily in a **passthrough** business model (transparent pricing, minimal spread, heavy on accurate network, plan, and claim data).
+
+We are defining a **new Canonical Data Model (CDM)** for this PBM.
+
+**CDM Name:** {domain}
+
+Please produce the **domain context** for this CDM with the following sections:
+
+1. **Business intent** -- why PBM operations need this domain, in a passthrough model.
+
+2. **Scope / out-of-scope** -- what belongs in this CDM vs what should stay in other CDMs (e.g., Member/Person, Provider/Pharmacy, Plan/Benefit, Claim).
+
+3. **Core business capabilities it supports** -- e.g., adjudication, client reporting, rebate settlement, network management, MAC lists, accumulator updates.
+
+4. **Primary data sources / standards** -- e.g., NCPDP, internal adjudication system, client eligibility feeds, network contracts, formulary systems.
+
+5. **Key entities (names only for now)** -- list what you expect to become tables.
+
+6. **PBM-specific considerations** -- especially those that are unique to passthrough (e.g., we must retain contract and rate detail as data, not just apply pricing).
+
+Format the output in markdown so it can be copy/pasted into the "Overview" / "Definition" tab of an Excel workbook.
+"""
+    
+    # Add input data sections
+    input_sections = []
+    
+    if 'fhir' in inputs_json:
+        input_sections.append(f"""
+## FHIR Profile Data (Industry Standard)
+
+The following FHIR resource profile is available as a foundation:
+```json
+{inputs_json['fhir']}
+```
+
+Use this as a baseline entity structure, adapting it for PBM passthrough model specifics.
+""")
+    
+    if 'guardrails' in inputs_json:
+        input_sections.append(f"""
+## Guardrails / Business Requirements
+
+The following business analyst specifications are available:
+```json
+{inputs_json['guardrails']}
+```
+
+These represent known business requirements and entity definitions for the {domain} domain.
+Consider these requirements when defining scope and entities.
+""")
+    
+    if 'ddl' in inputs_json:
+        input_sections.append(f"""
+## Current System DDL (Production Reality Check)
+
+The following table schemas exist in the current production system:
+```json
+{inputs_json['ddl']}
+```
+
+This shows what currently exists. The new CDM may extend, replace, or incorporate these structures.
+Note any gaps or opportunities for improvement.
+""")
+    
+    if 'naming_standard' in inputs_json:
+        input_sections.append(f"""
+## Enterprise Naming Standards
+
+The following naming conventions must be followed:
+```json
+{inputs_json['naming_standard']}
+```
+
+Ensure all entity and attribute names conform to these standards.
+""")
+    
+    # Combine prompt
+    if input_sections:
+        full_prompt = f"""{base_prompt}
+
+---
+
+# AVAILABLE INPUT DATA
+
+You have been provided with the following input data to inform your requirements:
+
+{''.join(input_sections)}
+
+---
+
+# YOUR TASK
+
+Using the input data provided above along with your knowledge of PBM systems and the passthrough model:
+
+1. Generate comprehensive requirements for the **{domain}** CDM
+2. Reference specific elements from the input data where relevant
+3. Identify any gaps or missing information
+4. Ensure the requirements support PBM passthrough operations
+
+Generate the requirements document now.
+"""
+    else:
+        # No inputs - just use base prompt
+        full_prompt = base_prompt
+    
+    return full_prompt
