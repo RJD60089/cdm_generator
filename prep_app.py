@@ -17,100 +17,18 @@ from src.config import load_config
 from src.converters import (
     convert_fhir_to_json,
     convert_guardrails_to_json,
-    convert_ddl_to_json,
+    convert_ddl_to_json,    
+    convert_glue_to_json,
     convert_naming_standard_to_json
 )
 from src.core.llm_client import LLMClient
 load_dotenv()
-
-# Model configuration from .env
-MODEL_OPTIONS = {
-    "gpt-5": {
-        "name": "gpt-5 (OpenAI - best reasoning)",
-        "provider": "openai",
-        "model": os.getenv("OPENAI_MODEL_5", "gpt-5"),
-        "api_key": lambda: os.getenv("OPENAI_API_KEY"),
-        "base_url": lambda: os.getenv("OPENAI_BASE_URL")
-    },
-    "gpt-4.1": {
-        "name": "gpt-4.1 (OpenAI - large context)",
-        "provider": "openai",
-        "model": os.getenv("OPENAI_MODEL_4.1", "gpt-4.1"),
-        "api_key": lambda: os.getenv("OPENAI_API_KEY"),
-        "base_url": lambda: os.getenv("OPENAI_BASE_URL")
-    },
-    "local-70b": {
-        "name": "local-70b (llama.cpp - Llama 3.3 70B)",
-        "provider": "llamacpp",
-        "model": os.getenv("LLAMACPP_MODEL_70B"),
-        "api_key": lambda: os.getenv("LLAMACPP_API_KEY", "dummy-key"),
-        "base_url": lambda: os.getenv("LLAMACPP_BASE_URL")
-    },
-    "local-32b": {
-        "name": "local-32b (unsloth/Qwen3-32B-GGUF Qwen3-32B-Q4_K_M.gguf)",
-        "provider": "llamacpp",
-        "model": os.getenv("LLAMACPP_MODEL_32B"),
-        "api_key": lambda: os.getenv("LLAMACPP_API_KEY", "dummy-key"),
-        "base_url": lambda: os.getenv("LLAMACPP_BASE_URL")
-    },
-    "local-8b": {
-        "name": "local-8b (vLLM - Llama 3.1 8B)",
-        "provider": "vllm",
-        "model": os.getenv("VLLM_MODEL_8B"),
-        "api_key": lambda: os.getenv("VLLM_API_KEY", "dummy-key"),
-        "base_url": lambda: os.getenv("VLLM_BASE_URL")
-    }
-}
-
-
-def prompt_user(message: str, default: str = "N") -> bool:
-    """
-    Prompt user for yes/no input with default.
-    
-    Args:
-        message: Prompt message
-        default: Default value ("Y" or "N")
-        
-    Returns:
-        True if yes, False if no
-    """
-    default_display = "Y/n" if default.upper() == "Y" else "y/N"
-    response = input(f"{message} ({default_display}): ").strip().upper()
-    
-    if not response:
-        response = default.upper()
-    
-    return response == "Y"
-
-
-def select_model() -> str:
-    """
-    Prompt user to select a model.
-    
-    Returns:
-        Selected model key
-    """
-    print("\nSelect model for rationalization:")
-    print("  1. gpt-5 (OpenAI - best reasoning) [DEFAULT]")
-    print("  2. gpt-4.1 (OpenAI - large context)")
-    print("  3. local-70b (llama.cpp - Llama 3.3 70B)")
-    print("  4. local-33b (llama.cpp - QWEN3 32B)")
-    print("  5. local-8b (vLLM - Llama 3.1 8B)")
-    
-    choice = input("Choice (1-5) [1]: ").strip()
-    
-    if not choice:
-        choice = "1"
-    
-    model_map = {
-        "1": "gpt-5",
-        "2": "gpt-4.1",
-        "3": "local-70b",
-        "4": "local-32b",
-        "5": "local-8b"
-    }
-    
-    return model_map.get(choice, "gpt-5")
+from src.core.model_selector import (
+    MODEL_OPTIONS,
+    select_model,
+    get_model_config,
+    prompt_user
+)
 
 
 def count_tokens(text: str) -> int:
@@ -135,7 +53,7 @@ def save_prompt_to_file(prompt: str, filename: str, prompts_dir: Path) -> dict:
 
 
 def build_fhir_rationalization_prompt(domain: str, fhir_files: list) -> tuple[str, list]:
-    """Build FHIR rationalization prompt"""
+    """Build FHIR rationalization prompt with full detail capture"""
     # Convert files to JSON
     fhir_json = []
     for fhir_file in fhir_files:
@@ -150,34 +68,63 @@ def build_fhir_rationalization_prompt(domain: str, fhir_files: list) -> tuple[st
 **Domain:** {domain}
 
 **Your Task:**
-Analyze the {len(fhir_files)} FHIR profile files provided and rationalize them into a unified set of entities and attributes.
+Analyze the {len(fhir_files)} FHIR profile files provided and rationalize them into a unified set of entities and attributes with FULL business context.
 
 **Rationalization Goals:**
 1. Identify all unique entities across all FHIR resources
 2. Consolidate duplicate or overlapping attributes
 3. Resolve conflicts between different FHIR resources
-4. Preserve important FHIR metadata (types, cardinality, descriptions)
-5. Create a clean, unified entity/attribute structure
+4. **Preserve ALL business context** (definitions, comments, requirements, constraints)
+5. Create a clean, unified entity/attribute structure with rich descriptions
+
+**CRITICAL - Capture Full FHIR Metadata:**
+
+For each attribute, extract from FHIR StructureDefinition elements:
+- **short**: Brief title/label
+- **definition**: Full technical definition
+- **comment**: Implementation guidance and business notes
+- **requirements**: Why this field exists (business purpose)
+- **constraint**: Validation rules and invariants
+- **binding**: Value set information (if applicable)
+- **mustSupport**: Whether implementations must support this element
+
+This rich context is essential for:
+- Accurate duplicate detection across sources in Step 2
+- Understanding business intent and use cases
+- Capturing implementation patterns and best practices
+- Generating complete business descriptions in final CDM
 
 **Output Format:**
 Return ONLY valid JSON (no markdown, no code blocks):
-```json
+
 {{
   "domain": "{domain}",
   "source": "fhir",
   "rationalized_entities": [
     {{
       "entity_name": "Coverage",
-      "description": "Member insurance coverage information",
-      "source_resources": ["Coverage", "InsurancePlan"],
+      "short_description": "Insurance coverage",
+      "description": "Detailed description of what this entity represents in PBM context",
+      "source_resources": ["Coverage"],
       "attributes": [
         {{
-          "attribute_name": "coverage_id",
+          "attribute_name": "coverage_identifier",
           "fhir_path": "Coverage.identifier",
           "data_type": "Identifier",
-          "cardinality": "1..*",
-          "required": true,
-          "description": "Unique coverage identifier",
+          "cardinality": "0..*",
+          "required": false,
+          "must_support": true,
+          
+          "short_description": "Business identifier(s) for this coverage",
+          "definition": "The identifier of the coverage as issued by the insurer.",
+          "comment": "The main (and possibly only) identifier for the coverage - often referred to as a Member Id, Certificate number, Personal Health Number or Case ID. May be constructed as the concatenation of the Coverage.SubscriberID and the Coverage.dependent. Note that not all insurers issue unique member IDs therefore searches may result in multiple responses.",
+          "requirements": "Allows coverages to be distinguished and referenced.",
+          
+          "constraints": [
+            "ele-1: All FHIR elements must have a @value or children"
+          ],
+          "binding": null,
+          
           "source_files": ["coverage.profile.json"]
         }},
         {{
@@ -186,28 +133,65 @@ Return ONLY valid JSON (no markdown, no code blocks):
           "data_type": "code",
           "cardinality": "1..1",
           "required": true,
-          "possible_values": ["active", "cancelled", "draft"],
-          "description": "Coverage status"
+          
+          "short_description": "Coverage status",
+          "definition": "The status of the resource instance.",
+          "comment": "This element is labeled as a modifier because the status contains codes that mark the resource as not currently valid.",
+          "requirements": "Need to track the status of the resource as 'draft' resources may undergo further edits while 'active' resources are immutable and may only be retired.",
+          
+          "constraints": [],
+          "binding": {{
+            "strength": "required",
+            "valueSet": "http://hl7.org/fhir/ValueSet/fm-status",
+            "description": "A code specifying the state of the resource instance."
+          }},
+          
+          "possible_values": ["active", "cancelled", "draft", "entered-in-error"],
+          
+          "source_files": ["coverage.profile.json"]
         }}
       ],
       "relationships": [
         {{
-          "related_entity": "Plan",
+          "related_entity": "Patient",
           "relationship_type": "many-to-one",
-          "fhir_reference": "Coverage.insurance.coverage",
-          "description": "Coverage belongs to a Plan"
+          "fhir_reference": "Coverage.beneficiary",
+          "description": "The party who benefits from the insurance coverage"
         }}
       ]
     }}
   ]
 }}
-```
+
+**Field Mapping from FHIR StructureDefinition:**
+
+When processing FHIR StructureDefinition snapshot elements:
+1. `element.short` → `short_description`
+2. `element.definition` → `definition`
+3. `element.comment` → `comment`
+4. `element.requirements` → `requirements`
+5. `element.constraint` → `constraints` (array)
+6. `element.binding` → `binding` (object with strength, valueSet, description)
+7. `element.mustSupport` → `must_support` (boolean)
+8. `element.min` and `element.max` → `cardinality` (e.g., "0..1", "1..1", "0..*")
+9. `element.min > 0` → `required` (true/false)
+
+**Handling Missing Fields:**
+- If a field doesn't exist in FHIR, set to null (not omit)
+- If comment/requirements/constraints are empty, set to null or []
+- Always include short_description, definition at minimum
+
+**For Nested/Complex Types:**
+- If an element has sub-elements (e.g., Coverage.class), create a separate entity
+- Link via relationships
+- Preserve the hierarchical structure
 
 **CRITICAL:** 
 - Output ONLY valid JSON
-- Rationalize conflicts (don't just list everything)
+- Include ALL textual fields from FHIR (short, definition, comment, requirements)
+- Rationalize conflicts (don't duplicate), but preserve all context
 - Focus on PBM passthrough model needs
-- Preserve cardinality and data types
+- Never truncate definition, comment, or requirements text
 
 ---
 
@@ -218,11 +202,19 @@ Return ONLY valid JSON (no markdown, no code blocks):
     for i, fhir_data in enumerate(fhir_json, 1):
         prompt += f"### FHIR File {i}: {fhir_data['filename']}\n\n```json\n{fhir_data['content']}\n```\n\n"
     
+    prompt += """
+---
+
+**Remember:** Extract and preserve ALL business context from FHIR definitions. This information is critical for downstream CDM generation and will prevent information loss.
+
+Generate the rationalized JSON now.
+"""
+    
     return prompt, fhir_json
 
 
 def build_guardrails_rationalization_prompt(domain: str, gr_files: list) -> tuple[str, list]:
-    """Build Guardrails rationalization prompt"""
+    """Build Guardrails rationalization prompt with data governance and calculated field context"""
     # Convert files to JSON
     gr_json = []
     for gr_file in gr_files:
@@ -237,166 +229,551 @@ def build_guardrails_rationalization_prompt(domain: str, gr_files: list) -> tupl
 **Domain:** {domain}
 
 **Your Task:**
-Analyze the {len(gr_files)} Guardrails specification files and rationalize them into a unified set of business entities and attributes.
+Analyze the {len(gr_files)} Guardrails specification files and rationalize them into a unified set of business entities and attributes with complete data governance.
 
 **Rationalization Goals:**
 1. Identify all unique business entities across all API specifications
 2. Consolidate duplicate or overlapping attributes across different APIs
 3. Resolve conflicts between API versions and specifications
-4. Preserve business rules and validation requirements
-5. Create a clean, unified business entity/attribute structure
+4. **Preserve business rules, validation requirements, AND data governance metadata**
+5. **Capture calculated field information and API request/response context**
+6. Create a clean, unified business entity/attribute structure
 
-**This is HEAVY rationalization** - different APIs may have conflicting definitions that need resolution.
+**CRITICAL - Enhanced Metadata Capture:**
+
+From the Excel columns in Guardrails files, extract:
+
+**Core Attribute Information:**
+- Entity Name (table/object)
+- Field Name (column/attribute)
+- Logical Data Type
+- Allow Null (Y/N) → convert to required and allow_null booleans
+
+**Data Governance (CRITICAL for compliance):**
+- **Data Classification** (Internal, Confidential, Restricted, etc.)
+- **PII (Y/N)** → is_pii boolean - Personally Identifiable Information flag
+- **PHI (Y/N)** → is_phi boolean - Protected Health Information flag (HIPAA)
+- These are MANDATORY for data governance and must be captured when present
+
+**Calculated Field Information:**
+- **Calculated Field (Y/N)** → is_calculated boolean
+- **Calculation Dependency** → what other fields this depends on
+- This distinguishes derived fields from source fields
+
+**Business Context:**
+- Description (synthesize from any available description/definition columns)
+- Business rules (entity-level constraints ONLY - not field-level constraints)
+- Validation rules (field-level constraints and formats)
+
+**Source File Tracking (CRITICAL - MANDATORY):**
+
+For EVERY attribute you extract, you MUST track which Guardrails file AND tab it comes from:
+
+1. **Check each file::tab provided below** - as you process each sheet in each Guardrails file, note which attributes it contains
+2. **Track the filename::tabname** - when you extract an attribute, record the EXACT "filename::tabname" in source_files array
+3. **List ALL file::tab combinations** - if the same attribute appears in multiple tabs or files, list ALL of them
+
+**Format:** "filename.xlsx::TabName"
+
+**Examples:**
+- Attribute in 1 tab only: 
+  source_files: ["GR_File_1.xlsx::V1 Handler Copay"]
+  
+- Attribute in 2 tabs same file: 
+  source_files: ["GR_File_1.xlsx::V1 Handler Copay", "GR_File_1.xlsx::V1 Handler Rate"]
+  
+- Attribute in multiple files/tabs: 
+  source_files: [
+    "GR_File_1.xlsx::V1 Handler Copay",
+    "GR_File_2.xlsx::Hierarchy",
+    "GR_File_3.xlsx::Plan"
+  ]
+
+**When consolidating similar attributes:**
+- If you merge "client_code" from File1::TabA and "clientCode" from File2::TabB into one attribute
+- Then source_files: ["GR_File_1.xlsx::TabA", "GR_File_2.xlsx::TabB"]
+
+**Important:**
+- Even if attribute definition is identical across tabs/files, LIST ALL file::tab combinations where it appears
+- source_files is at ATTRIBUTE level ONLY (do NOT add at entity level)
+- Use exact tab names as shown in the file data below
+- This is MANDATORY for complete provenance tracking
 
 **Output Format:**
 Return ONLY valid JSON (no markdown, no code blocks):
-```json
+
 {{
   "domain": "{domain}",
   "source": "guardrails",
   "rationalized_entities": [
     {{
-      "entity_name": "Plan",
-      "description": "Insurance plan product definition",
-      "source_apis": ["Hierarchy API v1.5", "Benefit Setup API v1.0"],
+      "entity_name": "EntityA",
+      "description": "Business entity representing [concept] in the domain",
+      "business_purpose": "Defines [business purpose and role]",
+      
       "attributes": [
         {{
-          "attribute_name": "plan_id",
+          "attribute_name": "entitya_id",
           "data_type": "string",
-          "max_length": 50,
           "required": true,
-          "description": "Unique plan identifier",
-          "validation_rules": ["Required", "Unique", "Alphanumeric"],
-          "source_files": ["GR_Hierarchy_v1.5.xlsx", "GR_BenefitSetup_v1.0.xlsx"]
+          "allow_null": false,
+          
+          "description": "Unique identifier for the entity",
+          "business_context": "Primary identifier used across all systems",
+          
+          "is_calculated": false,
+          "calculation_dependency": null,
+          
+          "data_classification": "Internal",
+          "is_pii": false,
+          "is_phi": false,
+          
+          "validation_rules": [
+            "Required",
+            "Must be unique",
+            "Alphanumeric only"
+          ],
+          
+          "business_rules": [
+            {{
+              "rule_type": "uniqueness",
+              "description": "Must be unique across the enterprise",
+              "enforcement": "Database constraint + API validation"
+            }}
+          ],
+          
+          "source_files": ["GR_File_1.xlsx::V1 Handler Copay", "GR_File_2.xlsx::Hierarchy"]
         }},
         {{
-          "attribute_name": "plan_type",
-          "data_type": "code",
+          "attribute_name": "entitya_name",
+          "data_type": "string",
           "required": true,
-          "allowed_values": ["Medical", "Pharmacy", "Dental", "Vision"],
-          "description": "Type of insurance plan"
-        }}
-      ],
-      "business_rules": [
+          "allow_null": false,
+          
+          "description": "Name of the entity",
+          "business_context": "Used for identification and display",
+          
+          "is_calculated": false,
+          "calculation_dependency": null,
+          
+          "data_classification": "Confidential",
+          "is_pii": true,
+          "is_phi": true,
+          
+          "validation_rules": [
+            "Required",
+            "Max length 200 characters"
+          ],
+          
+          "business_rules": [],
+          
+          "source_files": ["GR_File_1.xlsx::Plan"]
+        }},
         {{
-          "rule": "Plan must have at least one active benefit package",
-          "source": "BenefitSetup API"
+          "attribute_name": "calculated_amount",
+          "data_type": "decimal",
+          "required": false,
+          "allow_null": true,
+          
+          "description": "Calculated amount for the transaction",
+          "business_context": "Final amount after applying all business rules",
+          
+          "is_calculated": true,
+          "calculation_dependency": "base_amount + adjustment - discount",
+          
+          "data_classification": "Internal",
+          "is_pii": false,
+          "is_phi": false,
+          
+          "validation_rules": [
+            "Must be >= 0 if present",
+            "Maximum 2 decimal places"
+          ],
+          
+          "business_rules": [
+            {{
+              "rule_type": "conditional_constraint",
+              "condition": "entity_type = 'premium'",
+              "constraint": "calculated_amount <= 10000",
+              "description": "Premium type amounts cannot exceed $10,000",
+              "enforcement": "API validation"
+            }}
+          ],
+          
+          "source_files": ["GR_File_2.xlsx::V1 Handler Rate", "GR_File_n.xlsx::Benefit"]
         }}
       ],
       "relationships": [
         {{
-          "related_entity": "BenefitPackage",
-          "relationship_type": "one-to-many",
-          "foreign_key": "plan_id"
+          "related_entity": "EntityB",
+          "relationship_type": "many-to-one",
+          "foreign_key": "entityb_code",
+          "description": "EntityA belongs to EntityB"
         }}
       ]
     }}
   ]
 }}
-```
+
+**Field Extraction Guidelines:**
+
+1. **Entity Name**: Use the entity/table name from Excel. Normalize naming (e.g., "HandlerCopay" or "handler_copay")
+
+2. **Description**: Synthesize from any description/definition columns. Keep concise but meaningful.
+
+3. **Required**: 
+   - If "Allow Null" = "N" → required: true, allow_null: false
+   - If "Allow Null" = "Y" → required: false, allow_null: true
+
+4. **Calculated Field**:
+   - If "Calculated Field (Y/N)" = "Y" → is_calculated: true
+   - If "Y" and "Calculation Dependency" has value → capture the dependency
+   - If "N" or empty → is_calculated: false, calculation_dependency: null
+
+5. **Data Governance** (CRITICAL):
+   - **data_classification**: Extract from "Data Classification" column (Internal, Confidential, Restricted, etc.)
+   - **is_pii**: Convert "PII (Y/N)" column to boolean (Y→true, N→false, empty→false)
+   - **is_phi**: Convert "PHI (Y/N)" column to boolean (Y→true, N→false, empty→false)
+   - These are MANDATORY for compliance - always include even if false/null
+
+6. **Source Files** (CRITICAL):
+   - **At attribute level ONLY**: Track which specific Excel file(s) this attribute comes from
+   - If attribute appears in multiple Excel files, list ALL of them
+   - This ensures complete provenance tracking
+
+7. **Validation Rules**: Synthesize from:
+   - "Allow Null" → "Required" if N
+   - Any format notes or constraints mentioned
+   - Range or pattern requirements
+   - These are STRUCTURAL/FORMAT constraints
+
+8. **Business Rules** (at attribute level):
+   - **rule_type**: Type of business rule (conditional_constraint, range_limit, dependency, etc.)
+   - **condition**: IF condition (e.g., "claim_type = 'specialty'")
+   - **constraint**: THEN constraint (e.g., "max_payment <= 50000")
+   - **description**: Plain English explanation
+   - **enforcement**: How enforced (API validation, database trigger, etc.)
+   - These are BUSINESS LOGIC constraints, not structural
+   - Example: "If entity_type is 'premium', amount cannot exceed $10,000"
+   - Empty array [] if no business rules for attribute
+
+**Handling Multiple Sheets:**
+- Each Excel file may have multiple sheets (e.g., "V1 Handler Copay", "V1 Handler Dispense Fee")
+- Each sheet typically represents a different entity or API operation
+- Rationalize across sheets and files to consolidate similar entities
+
+**Handling Missing Data:**
+- If a field is not present in the Excel, set to null (don't omit)
+- If "Data Classification" column is empty → data_classification: null
+- If PII/PHI columns don't exist → is_pii: false, is_phi: false
+- Always include the governance fields even if false/null
 
 **CRITICAL:**
 - Output ONLY valid JSON
-- Heavy rationalization needed - resolve conflicts
-- Focus on PBM passthrough business model
-- Preserve business rules and validation
+- This is HEAVY rationalization - conflicting definitions need resolution
+- **Data governance fields (data_classification, is_pii, is_phi) are MANDATORY - always include them**
+- Calculated field information is important for distinguishing source vs derived data
+- Focus on business perspective (not just technical schema)
 
 ---
 
-## Guardrails Specification Files
+## Guardrails Files
 
 """
     
     for i, gr_data in enumerate(gr_json, 1):
         prompt += f"### Guardrails File {i}: {gr_data['filename']}\n\n```json\n{gr_data['content']}\n```\n\n"
     
+    prompt += """
+---
+
+**Remember:** 
+1. **Data governance metadata (PII/PHI) is CRITICAL** - always capture when available
+2. **Source files tracking is MANDATORY** - use "filename.xlsx::TabName" format for every attribute
+3. **During consolidation, track provenance** - if attribute appears in 3 file::tab combinations, source_files must have 3 entries
+4. **Business rules at ATTRIBUTE level** - not entity level (no entity business_rules field)
+5. **Validation rules vs Business rules** - validation is structural, business rules are conditional logic
+6. Calculated field info distinguishes source data from derived data
+7. Rationalize across files to consolidate similar entities
+8. Output ONLY valid JSON
+
+Generate the rationalized JSON now.
+"""
     return prompt, gr_json
 
 
+
 def build_ddl_rationalization_prompt(domain: str, ddl_files: list) -> tuple[str, list]:
-    """Build DDL rationalization prompt"""
-    # Convert files to JSON
-    ddl_json = []
-    for ddl_file in ddl_files:
-        ddl_json.append({
-            'filename': Path(ddl_file).name,
-            'content': convert_ddl_to_json(ddl_file)
+    """
+    Build DDL rationalization prompt for consolidated AWS Glue columns.
+    
+    NOTE: This now uses convert_glue_to_json() which consolidates columns
+    across all Glue jobs, showing which jobs each column appears in.
+    """
+    # Import at function level to avoid circular dependency
+    from src.converters import convert_glue_to_json
+    
+    # Convert files to consolidated JSON
+    glue_json = []
+    for glue_file in ddl_files:
+        glue_json.append({
+            'filename': Path(glue_file).name,
+            'content': convert_glue_to_json(glue_file)  # Uses new converter
         })
     
     # Build prompt
-    prompt = f"""You are a database architect rationalizing DDL schemas from multiple interface definitions for a PBM CDM.
+    prompt = f"""You are a database architect rationalizing AWS Glue columns for a PBM CDM.
 
 **Domain:** {domain}
 
-**Your Task:**
-Analyze the DDL files (which may contain multiple interface schemas) and rationalize them into a unified set of current-state entities and attributes.
+**CRITICAL CONTEXT:**
+The input has been PRE-CONSOLIDATED. Each column shows:
+- **Name**: Column name
+- **Type**: Data type
+- **GJSources**: List of ALL Glue jobs where this column appears
 
-**Rationalization Goals:**
-1. Identify all unique tables/entities across all interface definitions
-2. Consolidate duplicate or overlapping columns/attributes
-3. Resolve conflicts between different interface schemas
-4. Preserve data types, keys, and constraints
-5. Create a clean, unified current-state entity/attribute structure
+This means columns that appear in multiple Glue jobs have already been consolidated.
+You don't need to find duplicates - they're already grouped.
+
+**Your Task:**
+Create rationalized entities and attributes from the consolidated columns:
+
+1. **Group related columns into logical business entities**
+   - Use column name patterns (e.g., detail_client_*, detail_account_*)
+   - Consider business concepts (client, account, plan, benefit, etc.)
+   - Don't over-rationalize - keep related columns together
+
+2. **Track ALL Glue job sources for each attribute**
+   - Use the GJSources array to populate source_tables
+   - Format: "DatabaseName.GlueJobName.ColumnName"
+   - If a column appears in 3 Glue jobs, source_tables should have 3 entries
+
+3. **Infer logical primary keys** 
+   - Mark as "inferred": true (event data has no actual PKs)
+   - Look for columns with "_id" suffix matching entity name
+
+4. **Infer relationships between entities**
+   - Mark as "inferred": true (no FKs in Glue)
+   - Look for foreign key patterns (e.g., client_id in account entity)
+
+5. **Handle array columns properly**
+   - Columns like "resources[0]" represent arrays
+   - Don't split indices into separate attributes
+   - Rationalize as single array attribute "resources"
+
+**CRITICAL - DO NOT OVER-RATIONALIZE:**
+- **Keep ALL columns** - don't drop any
+- **Don't create bridge/junction entities** unnecessarily
+- **Include event envelope fields** (version, id, detail-type, source, account, time, region)
+- These are metadata but important for event processing
+- Goal: preserve all source data while normalizing naming
 
 **Output Format:**
 Return ONLY valid JSON (no markdown, no code blocks):
-```json
+
 {{
   "domain": "{domain}",
-  "source": "ddl",
+  "source": "ddl_glue",
+  "database_name": "/path/from/input",
   "rationalized_entities": [
     {{
-      "entity_name": "plan_bpm",
-      "description": "Current plan table in BPM system",
-      "source_schemas": ["interface_1", "interface_2"],
+      "entity_name": "Client",
+      "description": "Client organization in the benefits plan hierarchy",
+      
+      "glue_sources": [
+        "source_navitus_bpm_client_event",
+        "source_navitus_bpm_account_event"
+      ],
+      
       "attributes": [
         {{
-          "attribute_name": "plan_id",
-          "data_type": "varchar(50)",
+          "attribute_name": "client_id",
+          "data_type": "int",
           "nullable": false,
+          "nullable_inferred": true,
           "primary_key": true,
-          "description": "Unique plan identifier",
-          "source_tables": ["interface_1.plan", "interface_2.insurance_plan"]
+          "primary_key_inferred": true,
+          "description": "Unique identifier for the client organization",
+          
+          "source_tables": [
+            "/navitus/bpm/benefitsplanmanagement-analytics.source_navitus_bpm_client_event.detail_clientid",
+            "/navitus/bpm/benefitsplanmanagement-analytics.source_navitus_bpm_account_event.detail_clientid"
+          ]
         }},
         {{
-          "attribute_name": "plan_name",
-          "data_type": "varchar(200)",
-          "nullable": false,
-          "description": "Plan name"
+          "attribute_name": "client_name",
+          "data_type": "string",
+          "nullable": true,
+          "nullable_inferred": true,
+          "primary_key": false,
+          "primary_key_inferred": false,
+          "description": "Name of the client organization",
+          
+          "source_tables": [
+            "/navitus/bpm/benefitsplanmanagement-analytics.source_navitus_bpm_client_event.detail_name"
+          ]
+        }},
+        {{
+          "attribute_name": "effective_date",
+          "data_type": "date",
+          "nullable": true,
+          "nullable_inferred": true,
+          "primary_key": false,
+          "primary_key_inferred": false,
+          "description": "Date when client becomes effective",
+          
+          "source_tables": [
+            "/navitus/bpm/benefitsplanmanagement-analytics.source_navitus_bpm_client_event.detail_effectivedate"
+          ]
         }}
       ],
+      
       "keys": [
         {{
           "key_type": "primary",
-          "columns": ["plan_id"]
-        }},
+          "key_name": "PK_client",
+          "columns": ["client_id"],
+          "inferred": true
+        }}
+      ],
+      
+      "relationships": [
         {{
-          "key_type": "foreign",
-          "columns": ["network_id"],
-          "references": "network_bpm(network_id)"
+          "related_entity": "Account",
+          "relationship_type": "one-to-many",
+          "description": "Client has multiple accounts",
+          "foreign_key_attribute": "client_id",
+          "inferred": true
         }}
       ]
     }}
   ]
 }}
-```
 
-**CRITICAL:**
-- Output ONLY valid JSON
-- Rationalize across interface definitions
-- Preserve keys and constraints
-- Note: DDL represents current production state
+**Field Extraction Guidelines:**
+
+1. **Entity Name**: 
+   - Derive from column name patterns
+   - Remove prefixes: detail_, detail_mutation_, etc.
+   - Group by business concept (client, account, carrier, plan, etc.)
+   - Examples:
+     * detail_clientid, detail_clientname → "Client" entity
+     * detail_accountid, detail_accountname → "Account" entity
+     * detail_planid, detail_planname → "Plan" entity
+
+2. **Attribute Name**:
+   - Clean up column names (remove detail_, normalize casing)
+   - Use consistent naming (e.g., _id suffix for identifiers)
+   - Keep semantic meaning clear
+
+3. **Data Type**:
+   - Map from Glue types to logical types
+   - string → string (or varchar if length known)
+   - int → int
+   - bigint → bigint
+   - double → decimal
+   - timestamp → datetime
+   - date → date
+   - boolean → boolean
+   - array<T> → array<T>
+   - struct<...> → object or JSON
+
+4. **nullable (INFERRED)**:
+   - Always set nullable_inferred: true
+   - Heuristics:
+     * Fields with "_id" in name → nullable: false
+     * Fields with "name" in name → nullable: true
+     * Date fields → nullable: true
+     * Status fields → nullable: false
+
+5. **primary_key (INFERRED)**:
+   - Always set primary_key_inferred: true
+   - Heuristics:
+     * Field name matches entity name + "_id" → primary_key: true
+     * Example: client_id in Client entity → true
+     * Multiple PKs possible (composite keys)
+
+6. **description (GENERATED)**:
+   - Generate based on column name and business context
+   - Keep concise (1-2 sentences)
+   - Focus on business meaning in PBM domain
+
+7. **source_tables (CRITICAL)**:
+   - Format: "DatabaseName.GlueJobName.ColumnName"
+   - Use GJSources array from input to build this
+   - If column appears in 3 jobs, list all 3 paths
+   - Example:
+     * Input GJSources: ["job1", "job2", "job3"]
+     * Column: detail_clientid
+     * Output source_tables: [
+         "/navitus/bpm/db.job1.detail_clientid",
+         "/navitus/bpm/db.job2.detail_clientid",
+         "/navitus/bpm/db.job3.detail_clientid"
+       ]
+
+**Source Tracking (CRITICAL):**
+- **Entity level**: glue_sources lists ALL Glue jobs that contribute any attributes
+- **Attribute level**: source_tables lists ALL DatabaseName.GlueJob.Column paths
+- This ensures complete provenance tracking across all event sources
+
+**Relationship Inference:**
+- Look for foreign key patterns in column names
+- Example: client_id in Account entity → FK to Client
+- Mark all relationships as "inferred": true
+- Include foreign_key_attribute to show which column is the FK
+
+**Array Column Handling:**
+- Input may have: resources[0], resources[1], resources[2]
+- Rationalize to single: resources (type: array<string>)
+- Note in description that it's an array
+
+**Event Envelope Fields:**
+Keep these standard AWS event fields:
+- version (string)
+- id (string) - event ID
+- detail-type (string)
+- source (string)
+- account (string)
+- time (string/datetime)
+- region (string)
+- resources (array<string>)
+
+These can be grouped into an "EventMetadata" entity or kept with each domain entity.
+
+**CRITICAL REQUIREMENTS:**
+
+1. **ALWAYS set _inferred flags** - transparency about data provenance
+2. **Use consolidated GJSources** - don't duplicate work, use what's given
+3. **Generate complete source_tables paths** - DatabaseName.GlueJob.Column format
+4. **Keep ALL columns** - don't drop any from source
+5. **Output ONLY valid JSON** - no markdown, no code blocks
+6. **Don't over-normalize** - preserve event structure where appropriate
 
 ---
 
-## DDL Files
+## Consolidated Glue Files
 
 """
     
-    for i, ddl_data in enumerate(ddl_json, 1):
-        prompt += f"### DDL File {i}: {ddl_data['filename']}\n\n```json\n{ddl_data['content']}\n```\n\n"
+    for i, glue_data in enumerate(glue_json, 1):
+        prompt += f"### Glue File {i}: {glue_data['filename']}\n\n```json\n{glue_data['content']}\n```\n\n"
     
-    return prompt, ddl_json
+    prompt += """
+---
+
+**Remember:** 
+1. Input is PRE-CONSOLIDATED - columns already grouped by name+type with GJSources
+2. Use GJSources array to build complete source_tables paths
+3. Format: "DatabaseName.GlueJobName.ColumnName"
+4. Don't over-rationalize - keep event structure where appropriate
+5. Mark everything as inferred (no actual PKs/FKs in Glue)
+6. Include ALL columns - don't drop any
+7. Output ONLY valid JSON
+
+Generate the rationalized JSON now.
+"""
+    
+    return prompt, glue_json
 
 
 def build_naming_rationalization_prompt(domain: str, naming_files: list) -> tuple[str, list]:

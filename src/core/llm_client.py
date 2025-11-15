@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import logging
 from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
 from openai import OpenAI, BadRequestError, APIError, APIConnectionError, RateLimitError
 from tenacity import (
     retry,
@@ -26,9 +27,22 @@ from openai import (
     BadRequestError
 )
 
-from .run_state import TokenUsage
-
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TokenUsage:
+    """Token usage tracking for LLM calls"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    
+    def to_dict(self) -> dict:
+        return {
+            'prompt_tokens': self.prompt_tokens,
+            'completion_tokens': self.completion_tokens,
+            'total_tokens': self.total_tokens
+        }
 
 
 def _is_openai_cloud(base_url: Optional[str]) -> bool:

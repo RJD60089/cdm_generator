@@ -6,37 +6,28 @@ import json
 from pathlib import Path
 from openpyxl import load_workbook
 from typing import List, Dict, Any
+import pandas as pd
+from pathlib import Path
 
 
-def convert_guardrails_to_json(file_path: str) -> str:
-    """
-    Convert DGBee Guardrails Excel file to JSON string.
+def convert_guardrails_to_json(file_path: str) -> dict:
+    # Skip these tabs - no entity/attribute data
+    SKIP_TABS = ['Glossary', 'DGBee Summary', 'API Summary', 'Data Dictionary']
     
-    Extracts "Data Elements" sheets and converts to structured JSON.
+    xl = pd.ExcelFile(file_path)
+    sheets = {}
     
-    Args:
-        file_path: Path to Guardrails Excel file
+    for sheet_name in xl.sheet_names:
+        if sheet_name in SKIP_TABS:
+            continue  # Skip metadata tabs
         
-    Returns:
-        JSON string representation of Guardrails data
-        
-    Raises:
-        FileNotFoundError: If file doesn't exist
-        ValueError: If Excel file cannot be parsed
-    """
-    file = Path(file_path)
+        # Process data tabs and include tab name
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+        sheets[sheet_name] = df.to_dict('records')
     
-    if not file.exists():
-        raise FileNotFoundError(f"Guardrails file not found: {file_path}")
-    
-    try:
-        wb = load_workbook(file_path, data_only=True)
-    except Exception as e:
-        raise ValueError(f"Failed to load Excel file: {e}")
-    
-    output = {
-        "source_file": file.name,
-        "sheets": {}
+    return {
+        'source_file': Path(file_path).name,
+        'sheets': sheets  # Only contains data tabs
     }
     
     # Process each "Data Elements" sheet
