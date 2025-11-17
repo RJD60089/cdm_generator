@@ -1,7 +1,8 @@
 {
   "cdm": {
     "domain": "Plan and Benefit",
-    "description": "Insurance plan structures and benefit designs for PBM passthrough model"
+    "description": "Plan and Benefit CDM defines insurance plan products, benefit packages, coverage tiers, and network configurations in a passthrough PBM model. Focuses on contract pricing transparency, client/group hierarchy, benefit detail granularity needed for accurate adjudication, and billing reconciliation. Supports mid-year plan changes, multiple pricing tiers, and transparent rate structures required for passthrough operations.",
+    "version": "1.0"
   },
   "inputs": {
     "fhir": [
@@ -26,12 +27,14 @@
       "inputs/GR_Navitus_DGBee_v1.5_Plan and Benefit__Hierarchy_API.xlsx",
       "inputs/GR_P&B_APIs_Data_Governance.xlsx"
     ],
-    "ddl": [
+    "glue": [
       "inputs/DDL_plan_bpm_tables.json"
     ],
-    "naming_standard": [
-      "inputs/STNDRD_Enterprise Data Field Naming Standard.xlsx"
-    ]
+    "ncpdp": {
+      "general": "inputs/ncpdp_general_standards.json",
+      "script": "inputs/ncpdp_script_standards.json"
+    },
+    "other": []
   },
   "output": {
     "directory": "output/plan_and_benefit",

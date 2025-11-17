@@ -20,14 +20,14 @@ class InputsConfig:
     """Input file paths - all support single file or list of files"""
     fhir: Optional[Union[str, List[str]]] = None
     guardrails: Optional[Union[str, List[str]]] = None
-    ddl: Optional[Union[str, List[str]]] = None
+    glue: Optional[Union[str, List[str]]] = None
     naming_standard: Optional[Union[str, List[str]]] = None
     
     def normalize(self):
         """Convert all inputs to lists for consistent processing"""
         self.fhir = self._to_list(self.fhir)
         self.guardrails = self._to_list(self.guardrails)
-        self.ddl = self._to_list(self.ddl)
+        self.glue = self._to_list(self.glue)
         self.naming_standard = self._to_list(self.naming_standard)
     
     @staticmethod
@@ -79,10 +79,10 @@ class AppConfig:
                 if not Path(gr_file).exists():
                     errors.append(f"Guardrails file not found: {gr_file}")
         
-        if self.inputs.ddl:
-            for ddl_file in self.inputs.ddl:
-                if not Path(ddl_file).exists():
-                    errors.append(f"DDL file not found: {ddl_file}")
+        if self.inputs.glue:
+            for glue_file in self.inputs.glue:
+                if not Path(glue_file).exists():
+                    errors.append(f"Glue file not found: {glue_file}")
         
         if self.inputs.naming_standard:
             for ns_file in self.inputs.naming_standard:
@@ -127,7 +127,7 @@ def load_config(config_path: str) -> AppConfig:
         inputs_config = InputsConfig(
             fhir=inputs_data.get('fhir'),
             guardrails=inputs_data.get('guardrails'),
-            ddl=inputs_data.get('ddl'),
+            glue=inputs_data.get('glue'),
             naming_standard=inputs_data.get('naming_standard')
         )
         

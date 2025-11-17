@@ -5,18 +5,10 @@ Supports OpenAI API and compatible endpoints (Azure, local models).
 """
 from __future__ import annotations
 import os
+import time
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from openai import OpenAI, BadRequestError, APIError, APIConnectionError, RateLimitError
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log
-)
-
 from openai import (
     OpenAI,
     APIError,
@@ -26,8 +18,20 @@ from openai import (
     InternalServerError,
     BadRequestError
 )
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 
 logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 
 @dataclass
@@ -133,8 +137,6 @@ class LLMClient:
         return cls(
             model=model,
             base_url=base_url,
-            # temperature=temperature,
-            # max_tokens=max_tokens
         )
     
     def call(self, prompt: str) -> str:
@@ -159,13 +161,10 @@ class LLMClient:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True
     )
-
     def chat(
         self,
         messages: List[Dict[str, str]],
         response_format: Dict[str, Any] | None = None
-        # temperature: float | None = None,
-        # max_tokens: int | None = None
     ) -> tuple[str, TokenUsage | None]:
         """
         Send chat completion request to LLM.
@@ -173,8 +172,6 @@ class LLMClient:
         Args:
             messages: List of message dicts with 'role' and 'content'
             response_format: Response format specification (e.g., {"type": "json_object"})
-            temperature: Override default temperature for this call
-            max_tokens: Override default max_tokens for this call
         
         Returns:
             Tuple of (response_text, token_usage)
@@ -184,18 +181,13 @@ class LLMClient:
             APIError: For API errors (after retries exhausted)
         """
         self.total_calls += 1
+        start_time = time.time()
         
         # Build request kwargs
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            # "max_tokens": max_tokens or self.max_tokens,
         }
-        
-        # Use provided temperature or instance default
-        # temp = temperature if temperature is not None else self.temperature
-        # if temp is not None:
-        #     kwargs["temperature"] = temp
         
         # JSON mode for OpenAI cloud; many local servers ignore/404 on this
         if _is_openai_cloud(self.base_url):
@@ -206,6 +198,7 @@ class LLMClient:
             kwargs["response_format"] = response_format
         
         logger.debug(f"LLM call #{self.total_calls}: {len(messages)} messages, {kwargs.get('max_tokens')} max_tokens")
+        print(f"  🤖 Calling LLM: {self.model}...")
         
         try:
             resp = self.client.chat.completions.create(**kwargs)
@@ -213,26 +206,34 @@ class LLMClient:
             # Some endpoints reject temperature or response_format
             # Try progressively simpler requests
             logger.warning(f"BadRequestError on LLM call: {e}. Attempting fallback...")
+            print(f"  ⚠️  BadRequestError, attempting fallback...")
             
             msg = str(e).lower()
             
             # Remove response_format if it caused the error
             if "response_format" in msg or "json" in msg:
                 logger.info("Removing response_format and retrying...")
+                print(f"  🔄 Removing response_format and retrying...")
                 kwargs.pop("response_format", None)
             
             # Remove temperature if it caused the error
             if "temperature" in msg:
                 logger.info("Removing temperature and retrying...")
+                print(f"  🔄 Removing temperature and retrying...")
                 kwargs.pop("temperature", None)
             
             # Retry with simplified parameters
             try:
                 resp = self.client.chat.completions.create(**kwargs)
                 logger.info("Fallback request succeeded")
+                print(f"  ✓ Fallback succeeded")
             except BadRequestError as e2:
                 logger.error(f"Fallback also failed: {e2}")
+                print(f"  ❌ Fallback failed: {e2}")
                 raise
+        
+        # Calculate duration
+        duration = time.time() - start_time
         
         # Extract response
         content = resp.choices[0].message.content or ""
@@ -259,6 +260,13 @@ class LLMClient:
                 f"LLM response: {len(content)} chars, "
                 f"{total_tokens} tokens, finish={finish_reason}"
             )
+            
+            # Print timing and token info to terminal
+            print(f"  ⏱️  Completed in {duration:.1f}s")
+            print(f"  📊 Tokens: {total_tokens:,} ({prompt_tokens:,} prompt + {completion_tokens:,} completion)")
+        else:
+            # No usage info available (some local models)
+            print(f"  ⏱️  Completed in {duration:.1f}s")
         
         # Log usage to file
         self._log_usage(finish_reason, token_usage)
