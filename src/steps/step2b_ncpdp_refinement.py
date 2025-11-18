@@ -5,7 +5,6 @@ Step 2b: NCPDP Refinement & Gap Analysis
 Enhances foundation CDM from Step 2a by:
 - Mapping NCPDP fields to existing CDM attributes
 - Adding NCPDP-specific attributes when no FHIR equivalent exists
-- Defining PK/FK relationships
 - Generating disposition report (mapped vs added vs not used)
 
 Input: Foundation CDM JSON from Step 2a + NCPDP standards
@@ -24,13 +23,19 @@ def build_prompt(config: AppConfig, foundation_cdm: dict, ncpdp_standards: dict)
     """Build Step 2b prompt for NCPDP refinement"""
     
     # Build NCPDP section with context
-    ncpdp_section = "### NCPDP STANDARDS\n\n"
+    ncpdp_section = "### NCPDP STANDARDS (Flattened Format)\n\n"
     
     if ncpdp_standards.get('general'):
-        ncpdp_section += """**General Standards (NCPDP Telecom D.0):**
-These are real-time pharmacy claims transaction standards used for adjudication.
+        ncpdp_section += """**General Standards (NCPDP Telecom D.0 + Others):**
+This is a DEDUPLICATED, flattened list of NCPDP fields where each field appears ONCE.
 
-Key areas:
+**Structure:**
+- `_columns`: Explains what each abbreviated key means (i=FIELD, n=NAME, d=DEFINITION, etc.)
+- `_standards`: Lookup table for standard codes (T=Telecommunication, A=Post Adjudication, etc.)
+- `fields`: Array of 1,140+ unique NCPDP fields
+  - Each field has `s` property listing which standards use it (e.g., "T,A" = used in Telecom & Post Adjudication)
+
+**Key areas covered:**
 - **Claims Processing:** Claim submission, reversals, billing
 - **Pricing:** Ingredient cost, dispensing fees, tax, MAC pricing
 - **Patient Information:** Member/cardholder demographics, coverage details
@@ -40,7 +45,18 @@ Key areas:
 - **Compound Drugs:** Compound indicators, ingredient details
 - **DAW Codes:** Dispense as written / product selection codes
 
-These fields are CRITICAL for PBM adjudication, pricing engines, and billing reconciliation.
+**CRITICAL (SCOPED):**
+Focus on NCPDP fields that are relevant to Plan & Benefit:
+- Eligibility / coverage / member-card info
+- Plan identifiers, group identifiers, BIN/PCN
+- Pricing, cost-share, accumulators, benefit stages (deductible, gap, catastrophic)
+- Formulary status, prior authorization, step therapy indicators
+- Quantity limits, day supply limits
+- Network tier codes, plan limitations
+
+For obviously out-of-scope fields (e.g., prescriber-specific identifiers, clinical measurement fields, detailed DUR codes, message header/plumbing fields):
+- You MAY handle them via a summarized rule in the disposition report instead of one-by-one
+- Example: "All prescriber-only identifier fields (401-D1, 411-DB, etc.) are not_used for Plan & Benefit CDM"
 
 """
         ncpdp_section += f"```json\n{json.dumps(ncpdp_standards['general'], indent=2)}\n```\n\n"
@@ -51,7 +67,7 @@ These fields are CRITICAL for PBM adjudication, pricing engines, and billing rec
         ncpdp_section += """**SCRIPT Standards (NCPDP SCRIPT - ePrescribing XML):**
 These are XML-based ePrescribing messages between providers, pharmacies, and payers.
 
-Key message types:
+**Key message types:**
 - **NewRx:** New prescription from provider to pharmacy
 - **RefillRequest:** Pharmacy requests refill authorization
 - **RxChange:** Prescription modifications
@@ -60,11 +76,16 @@ Key message types:
 
 These are used for prescription routing and prior authorization workflows, NOT claims adjudication.
 
-Focus on SCRIPT fields that relate to:
-- Benefit verification
-- Prior authorization requirements
-- Formulary status
-- Plan-level restrictions
+**CRITICAL (SCOPED):**
+Focus on SCRIPT fields that relate to Plan & Benefit:
+- Benefit verification indicators
+- Prior authorization requirements and status
+- Formulary status and restrictions
+- Plan-level restrictions (quantity limits, step therapy)
+- Coverage determination fields
+
+For message header fields, routing fields, or provider-specific fields that don't affect Plan & Benefit structure:
+- You MAY group these as out-of-scope in the disposition report
 
 """
         ncpdp_section += f"```json\n{json.dumps(ncpdp_standards['script'], indent=2)}\n```\n\n"
@@ -75,15 +96,35 @@ Focus on SCRIPT fields that relate to:
         ncpdp_section += """**⚠️ NO NCPDP STANDARDS PROVIDED**
 
 You will need to:
-1. Define Primary Keys and Foreign Keys based on FHIR structure
-2. Add common PBM/pharmacy fields you know should exist (DAW, MAC, DUR codes)
-3. Note in disposition report that comprehensive NCPDP mapping requires standards input
+1. Add common PBM/pharmacy fields you know should exist (DAW, MAC, DUR codes)
+2. Note in disposition report that comprehensive NCPDP mapping requires standards input
 
-Proceed with PK/FK definitions and add well-known pharmacy-specific fields.
+Proceed with adding well-known pharmacy-specific fields.
 
 """
     
     prompt = f"""You are an expert healthcare data modeler specializing in PBM, FHIR, and NCPDP standards.
+
+## ⚠️ PRESERVE THE FOUNDATION CDM STRUCTURE
+
+**YOU MUST PRESERVE THE FOUNDATION CDM:**
+- **EVERY entity** from the foundation CDM input below must appear in your output
+- **EVERY attribute** from the foundation CDM input must appear in your output
+- You may REORDER entities/attributes, but do not REMOVE them
+- **DO NOT SUMMARIZE** or condense the CDM structure itself
+
+**YOUR TASK IS TO ADD, NOT SUBTRACT:**
+- ADD NCPDP mappings to existing attributes (in source_mappings.ncpdp)
+- ADD new NCPDP-specific attributes where justified
+- ADD new entities ONLY if absolutely necessary
+- PRESERVE everything from the foundation CDM
+
+**If you approach response size limits:**
+- PRIORITIZE keeping the CDM entities/attributes intact
+- You MAY summarize some NCPDP dispositions (see below) rather than listing each one individually
+- DO NOT return an artificial error; return the best complete CDM JSON you can within limits
+
+---
 
 ## CDM CONTEXT
 
@@ -93,16 +134,16 @@ Proceed with PK/FK definitions and add well-known pharmacy-specific fields.
 
 ## YOUR TASK
 
-Enhance the FHIR-based CDM foundation with NCPDP D.0 mappings and identify gaps.
+Enhance the FHIR-based CDM foundation by mapping NCPDP fields and identifying gaps.
 
 **DEFAULT BIAS: MAP TO EXISTING CDM**
 The burden of proof is on ADDING new attributes/entities, not on mapping. Preserve the FHIR foundation.
 
 This is **Step 2b: NCPDP Refinement** - you are:
-1. Mapping NCPDP fields to existing CDM attributes
-2. Adding NCPDP-specific attributes ONLY when justified
-3. Defining Primary Keys and Foreign Keys
-4. Generating complete disposition report for ALL NCPDP fields
+1. Mapping NCPDP fields to existing CDM attributes (add to source_mappings.ncpdp)
+2. Adding NCPDP-specific attributes ONLY when justified and no CDM equivalent exists
+3. Generating disposition report: detailed for in-scope fields, grouped rules for out-of-scope
+4. **NEVER removing or omitting any existing entities or attributes**
 
 ---
 
@@ -147,14 +188,19 @@ Ask: Does this field impact:
 **If NO** → Add as extension attribute on single entity
 **If YES** → Consider new standalone attribute/entity
 
-### Step 4: Classify disposition (REQUIRED for ALL NCPDP fields)
+### Step 4: Classify disposition
 
-Every NCPDP field must be one of:
+Every IN-SCOPE NCPDP field (Plan & Benefit relevant) must be one of:
 1. **mapped** - Direct mapping to existing CDM attribute
 2. **transformed** - Derived/combined from existing CDM attributes
 3. **extension_attribute** - New attribute added to existing entity
 4. **extension_entity** - New entity created
 5. **not_used** - Field not needed (with business justification)
+
+For clearly OUT-OF-SCOPE fields, you MAY:
+- Group them into a summarized disposition rule
+- Example: "All SCRIPT message-header fields (MessageID, SentTime, etc.) are not_used for Plan & Benefit CDM"
+- Document the grouping in the disposition report summary
 
 ---
 
@@ -365,47 +411,55 @@ Return ONLY valid JSON in this structure:
     }}
   ],
   
-  "relationships": [
-    {{
-      "parent_entity": "InsuranceProduct",
-      "child_entity": "InsurancePlan",
-      "relationship_type": "one_to_many",
-      "description": "One product can have multiple plans"
-    }}
-  ],
-  
   "business_capabilities": [],
   
   "ncpdp_disposition_report": {{
     "summary": {{
       "total_ncpdp_fields_evaluated": 0,
+      "in_scope_fields_detailed": 0,
+      "out_of_scope_fields_grouped": 0,
       "mapped_to_existing_cdm": 0,
       "mapped_via_transformation": 0,
       "extension_attributes_added": 0,
       "extension_entities_added": 0,
       "not_used": 0
     }},
+    "field_accounting": {{
+      "total_input_fields": 0,
+      "detailed_disposition_count": 0,
+      "grouped_disposition_count": 0,
+      "total_accounted_for": 0,
+      "accounting_complete": true,
+      "note": "Must equal 100%: total_input_fields = detailed + grouped"
+    }},
     "details": [
       {{
-        "ncpdp_field": "AM07.Plan_ID",
+        "ncpdp_field": "302-C2.Cardholder_ID",
         "disposition": "mapped",
-        "cdm_target": "InsurancePlan.plan_identifier_value",
+        "cdm_target": "Coverage.subscriber_id",
         "mapping_type": "direct",
-        "notes": null
+        "notes": "Plan & Benefit relevant - member identification"
       }},
       {{
-        "ncpdp_field": "420-DK.DAW_Product_Selection_Code",
+        "ncpdp_field": "512-FC.Accumulated_Deductible_Amount",
         "disposition": "extension_attribute",
-        "cdm_target": "Coverage.dispense_as_written_code",
+        "cdm_target": "Coverage.deductible_accumulated",
         "mapping_type": "new_attribute",
-        "justification": "Pharmacy-specific, no FHIR equivalent, required for adjudication"
+        "justification": "Pharmacy-specific accumulator, no FHIR equivalent, required for benefit stage tracking"
       }},
       {{
-        "ncpdp_field": "401-D1.Prescriber_ID",
+        "disposition_group": "prescriber_identifiers",
         "disposition": "not_used",
-        "cdm_target": null,
-        "mapping_type": null,
-        "justification": "Prescriber entity outside Plan & Benefit CDM scope"
+        "fields_count": 15,
+        "example_fields": ["401-D1.Prescriber_ID", "411-DB.Prescriber_Last_Name", "427-DR.DEA_Number"],
+        "justification": "Prescriber entity outside Plan & Benefit CDM scope - belongs in Prescriber CDM"
+      }},
+      {{
+        "disposition_group": "dur_clinical_details",
+        "disposition": "not_used",
+        "fields_count": 25,
+        "example_fields": ["473-7E.DUR_Service_Reason_Code", "439-E4.Reason_For_Service_Code"],
+        "justification": "Clinical DUR details out of scope for Plan & Benefit - belongs in Utilization Management CDM"
       }}
     ]
   }}
@@ -416,12 +470,25 @@ Return ONLY valid JSON in this structure:
 
 ## CRITICAL REQUIREMENTS
 
-1. **Map FIRST** - Try to map every NCPDP field to existing CDM before adding new
-2. **Justify additions** - Every new attribute/entity needs origin.justification explaining why mapping impossible
-3. **Complete disposition** - Every NCPDP field in the standard must have disposition classification
-4. **Define PK/FK** - Every entity needs primary_key and foreign_keys (if applicable) - EVEN IF NO NCPDP FILES PROVIDED
-5. **Preserve origin** - Keep all origin tracking from Step 2a, add for new fields
-6. **Output ONLY valid JSON** - No markdown, no code blocks, no commentary
+1. **PRESERVE EVERYTHING** - Every entity and attribute from foundation CDM must appear in output
+2. **Focus on in-scope fields** - Prioritize Plan & Benefit relevant NCPDP fields for detailed disposition
+3. **Map FIRST** - Try to map every relevant NCPDP field to existing CDM before adding new
+4. **Justify additions** - Every new attribute/entity needs origin.justification explaining why mapping impossible
+5. **ACCOUNT FOR ALL FIELDS** - You MUST account for 100% of NCPDP fields:
+   - Count total NCPDP fields in the input
+   - Every field must have EITHER detailed disposition OR be part of a grouped rule
+   - Provide field_accounting reconciliation showing: total_input_fields = detailed + grouped
+   - If your accounting does NOT equal 100%, you have FAILED the requirement
+6. **Disposition requirements:**
+   - Every IN-SCOPE NCPDP field (Plan & Benefit relevant) must have a disposition classification
+   - For OUT-OF-SCOPE fields, you MAY:
+     - Define one or more grouped rules (e.g., "All prescriber-only identifiers = not_used for Plan & Benefit CDM")
+     - You do NOT need to list every one individually
+7. **Origin requirements:**
+   - Preserve origin for all existing CDM attributes
+   - Add origin for new attributes/entities
+   - For grouped or summarized dispositions, it is sufficient to describe the rule, not each field
+8. **Output ONLY valid JSON** - No markdown, no code blocks, no commentary
 
 ---
 
@@ -461,30 +528,78 @@ def run_step2b(
     entity_count = len(foundation_cdm.get('entities', []))
     print(f"  📊 Found {entity_count} entities in foundation CDM")
     
-    # Load NCPDP standards
+    # Load NCPDP standards - prefer rationalized versions from Step 1d
     print(f"  📖 Loading NCPDP standards...")
     ncpdp_standards = {}
     
-    if hasattr(config.inputs, 'ncpdp') and config.inputs.ncpdp:
-        # Load general NCPDP standards
-        if 'general' in config.inputs.ncpdp:
-            general_file = Path(config.inputs.ncpdp['general'])
-            if general_file.exists():
-                with open(general_file, 'r', encoding='utf-8') as f:
-                    ncpdp_standards['general'] = json.load(f)
-                print(f"    ✓ Loaded general NCPDP standards")
+    # Check for rationalized NCPDP files from Step 1d (in prep directory)
+    prep_outdir = outdir.parent / "prep"
+    rationalized_general = None
+    rationalized_script = None
+    
+    if prep_outdir.exists():
+        # Look for most recent rationalized files
+        general_files = sorted(prep_outdir.glob("rationalized_ncpdp_general_*.json"))
+        script_files = sorted(prep_outdir.glob("rationalized_ncpdp_script_*.json"))
         
-        # Load SCRIPT standards
+        if general_files:
+            rationalized_general = general_files[-1]
+            print(f"    📁 Found rationalized general NCPDP from Step 1d")
+        
+        if script_files:
+            rationalized_script = script_files[-1]
+            print(f"    📁 Found rationalized script NCPDP from Step 1d")
+    
+    if hasattr(config.inputs, 'ncpdp') and config.inputs.ncpdp:
+        # Load general NCPDP standards (rationalized if available, else full)
+        if 'general' in config.inputs.ncpdp:
+            if rationalized_general:
+                with open(rationalized_general, 'r', encoding='utf-8') as f:
+                    general_data = json.load(f)
+                field_count = len(general_data.get('fields', []))
+                if field_count > 0:
+                    ncpdp_standards['general'] = general_data
+                    print(f"    ✓ Using rationalized general NCPDP ({field_count:,} fields)")
+                else:
+                    print(f"    ⚠️  Rationalized general NCPDP is empty - skipping")
+            else:
+                general_file = Path(config.inputs.ncpdp['general'])
+                if general_file.exists():
+                    with open(general_file, 'r', encoding='utf-8') as f:
+                        general_data = json.load(f)
+                    field_count = len(general_data.get('fields', []))
+                    if field_count > 0:
+                        ncpdp_standards['general'] = general_data
+                        print(f"    ✓ Loaded full general NCPDP ({field_count:,} fields)")
+                    else:
+                        print(f"    ⚠️  General NCPDP is empty - skipping")
+        
+        # Load SCRIPT standards (rationalized if available, else full)
         if 'script' in config.inputs.ncpdp:
-            script_file = Path(config.inputs.ncpdp['script'])
-            if script_file.exists():
-                with open(script_file, 'r', encoding='utf-8') as f:
-                    ncpdp_standards['script'] = json.load(f)
-                print(f"    ✓ Loaded SCRIPT standards")
+            if rationalized_script:
+                with open(rationalized_script, 'r', encoding='utf-8') as f:
+                    script_data = json.load(f)
+                field_count = len(script_data.get('fields', []))
+                if field_count > 0:
+                    ncpdp_standards['script'] = script_data
+                    print(f"    ✓ Using rationalized SCRIPT NCPDP ({field_count:,} fields)")
+                else:
+                    print(f"    ⚠️  Rationalized SCRIPT NCPDP is empty - skipping")
+            else:
+                script_file = Path(config.inputs.ncpdp['script'])
+                if script_file.exists():
+                    with open(script_file, 'r', encoding='utf-8') as f:
+                        script_data = json.load(f)
+                    field_count = len(script_data.get('fields', []))
+                    if field_count > 0:
+                        ncpdp_standards['script'] = script_data
+                        print(f"    ✓ Loaded full SCRIPT standards ({field_count:,} fields)")
+                    else:
+                        print(f"    ⚠️  SCRIPT standards is empty - skipping")
     
     if not ncpdp_standards:
         print(f"  ⚠️  WARNING: No NCPDP standards found in config")
-        print(f"     Step 2b will focus on PK/FK definitions and add known PBM fields")
+        print(f"     Step 2b will add known PBM fields without NCPDP crosswalk")
     
     # Build prompt
     prompt = build_prompt(config, foundation_cdm, ncpdp_standards)
@@ -506,6 +621,10 @@ def run_step2b(
     
     # Live mode - call LLM
     print(f"  🤖 Calling LLM to enhance CDM with NCPDP mappings...")
+    
+    # Note: LLMClient has a bug - it stores max_tokens but doesn't use it in API call
+    # For now relying on model's default output limit
+    # TODO: Fix LLMClient to add max_tokens to kwargs, or pass it explicitly here
     
     messages = [
         {
@@ -538,6 +657,50 @@ def run_step2b(
             raise ValueError("Response missing 'entities' key")
         if 'ncpdp_disposition_report' not in enhanced_cdm:
             print("  ⚠️  WARNING: Response missing 'ncpdp_disposition_report'")
+        
+        # Validate no data loss - CRITICAL
+        foundation_entity_count = len(foundation_cdm.get('entities', []))
+        enhanced_entity_count = len(enhanced_cdm.get('entities', []))
+        
+        if enhanced_entity_count < foundation_entity_count:
+            raise ValueError(
+                f"❌ DATA LOSS DETECTED: Enhanced CDM has {enhanced_entity_count} entities "
+                f"but foundation had {foundation_entity_count}. "
+                f"LLM removed {foundation_entity_count - enhanced_entity_count} entities. REJECTING OUTPUT."
+            )
+        
+        foundation_attr_count = sum(len(e.get('attributes', [])) for e in foundation_cdm.get('entities', []))
+        enhanced_attr_count = sum(len(e.get('attributes', [])) for e in enhanced_cdm.get('entities', []))
+        
+        if enhanced_attr_count < foundation_attr_count:
+            raise ValueError(
+                f"❌ DATA LOSS DETECTED: Enhanced CDM has {enhanced_attr_count} attributes "
+                f"but foundation had {foundation_attr_count}. "
+                f"LLM removed {foundation_attr_count - enhanced_attr_count} attributes. REJECTING OUTPUT."
+            )
+        
+        # Validate field accounting - CRITICAL
+        total_ncpdp_fields = 0
+        if ncpdp_standards.get('general'):
+            total_ncpdp_fields += len(ncpdp_standards['general'].get('fields', []))
+        if ncpdp_standards.get('script'):
+            total_ncpdp_fields += len(ncpdp_standards['script'].get('fields', []))
+        
+        if total_ncpdp_fields > 0:
+            field_accounting = enhanced_cdm.get('ncpdp_disposition_report', {}).get('field_accounting', {})
+            if field_accounting:
+                accounted = field_accounting.get('total_accounted_for', 0)
+                if accounted != total_ncpdp_fields:
+                    print(f"  ⚠️  WARNING: Field accounting incomplete")
+                    print(f"     Total NCPDP fields: {total_ncpdp_fields}")
+                    print(f"     Fields accounted for: {accounted}")
+                    print(f"     Missing: {total_ncpdp_fields - accounted} fields")
+                else:
+                    print(f"  ✓ Field accounting complete: {accounted}/{total_ncpdp_fields} fields")
+            else:
+                print(f"  ⚠️  WARNING: No field_accounting section in disposition report")
+        
+        print(f"  ✓ Validation passed: No data loss detected")
         
         # Save output
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

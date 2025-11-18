@@ -34,6 +34,9 @@
       "general": "inputs/ncpdp_general_standards.json",
       "script": "inputs/ncpdp_script_standards.json"
     },
+    "ncpdp_filter": {
+      "standards": ["T", "F", "H", "A"]
+    },
     "other": []
   },
   "output": {

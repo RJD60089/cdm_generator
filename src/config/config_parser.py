@@ -21,6 +21,8 @@ class InputsConfig:
     fhir: Optional[Union[str, List[str]]] = None
     guardrails: Optional[Union[str, List[str]]] = None
     glue: Optional[Union[str, List[str]]] = None
+    ncpdp: Optional[Dict[str, str]] = None
+    ncpdp_filter: Optional[Dict[str, Any]] = None
     naming_standard: Optional[Union[str, List[str]]] = None
     
     def normalize(self):
@@ -29,6 +31,8 @@ class InputsConfig:
         self.guardrails = self._to_list(self.guardrails)
         self.glue = self._to_list(self.glue)
         self.naming_standard = self._to_list(self.naming_standard)
+        # ncpdp is a dict, not normalized to list
+        # ncpdp_filter is a dict, not normalized to list
     
     @staticmethod
     def _to_list(value: Optional[Union[str, List[str]]]) -> Optional[List[str]]:
@@ -89,6 +93,11 @@ class AppConfig:
                 if not Path(ns_file).exists():
                     errors.append(f"Naming standard file not found: {ns_file}")
         
+        if self.inputs.ncpdp:
+            for key, ncpdp_file in self.inputs.ncpdp.items():
+                if not Path(ncpdp_file).exists():
+                    errors.append(f"NCPDP {key} file not found: {ncpdp_file}")
+        
         return errors
 
 
@@ -128,6 +137,8 @@ def load_config(config_path: str) -> AppConfig:
             fhir=inputs_data.get('fhir'),
             guardrails=inputs_data.get('guardrails'),
             glue=inputs_data.get('glue'),
+            ncpdp=inputs_data.get('ncpdp'),
+            ncpdp_filter=inputs_data.get('ncpdp_filter'),
             naming_standard=inputs_data.get('naming_standard')
         )
         

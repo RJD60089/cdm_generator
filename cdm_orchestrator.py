@@ -198,6 +198,22 @@ Examples:
                     dry_run=dry_run
                 )
             
+            # Step 1d: NCPDP Rationalization
+            process_ncpdp = False
+            if config.inputs.ncpdp and config.inputs.ncpdp_filter:
+                print(f"\nFound NCPDP standards with filter configuration")
+                process_ncpdp = prompt_user("Rationalize NCPDP to domain-relevant fields?", default="Y")
+            
+            if process_ncpdp:
+                print(f"\n=== Step 1d: NCPDP Rationalization ===")
+                from src.steps.step1d_ncpdp import run_step1d
+                
+                run_step1d(
+                    config=config,
+                    outdir=prep_outdir,
+                    dry_run=dry_run
+                )
+            
             print(f"\n{'='*60}")
             print(f"✓ STEP 1 COMPLETE")
             print(f"  Rationalized files saved to: {prep_outdir}")
