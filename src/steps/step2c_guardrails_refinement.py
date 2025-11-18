@@ -9,7 +9,7 @@ Enhances CDM from Step 2b by:
 - Outputting unmapped fields to separate JSON for review
 
 Input: Enhanced CDM from Step 2b + Rationalized Guardrails JSON
-Output: Enhanced CDM with Guardrails mappings + unmapped fields JSON
+Output: Enhanced CDM with Guardrails mappings + unmapped fields JSON + disposition report
 """
 from __future__ import annotations
 import json
@@ -23,44 +23,154 @@ from src.core.llm_client import LLMClient
 def build_prompt(config: AppConfig, enhanced_cdm: dict, guardrails: dict) -> str:
     """Build Step 2c prompt for Guardrails refinement"""
     
-    prompt = f"""You are an expert healthcare data modeler specializing in PBM data integration.
+    prompt = f"""You are an expert healthcare data modeler specializing in PBM, FHIR, and NCPDP standards.
 
-## ⚠️ PRESERVE THE CDM STRUCTURE
+## ⚠️ CRITICAL CONTEXT: GUARDRAILS REPRESENTS PRODUCTION REALITY
 
-**YOU MUST PRESERVE THE ENHANCED CDM:**
-- **EVERY entity** from the enhanced CDM input must appear in output
-- **EVERY attribute** from enhanced CDM must appear in output
-- You may REORDER, but do not REMOVE
-- Your task is to ADD Guardrails mappings, not rewrite the CDM
+**Guardrails files contain KNOWN, USED fields from actual production APIs.** These are NOT theoretical standards - these are fields actively used in business operations.
 
-**If you approach response size limits:**
-- PRIORITIZE keeping CDM entities/attributes intact
-- You MAY summarize disposition entries
-- DO NOT return error; return best complete CDM JSON within limits
+**Your task:** Map ALL Guardrails fields to the Foundational CDM provided as input. If fields cannot map, this indicates a GAP in the CDM - missing attributes or potentially missing entities.
 
----
+This task is one step out of many to produce an enterprise CDM core to the Enterprise Data Platform.
+
+This process as well as this prompt can be used for any CDM creation, the specific context for the CDM to be processed is below:
 
 ## CDM CONTEXT
 
-**Domain:** {config.cdm.domain}
+**Domain:** {config.cdm.domain} - IMPORTANT TO REMEMBER THIS - WILL BE REFERENCED SEVERAL TIMES BELOW
 
 **Description:** {config.cdm.description}
 
-## YOUR TASK
+Overview of the approach for this task:
+1. Map ALL Guardrails attributes to the Foundational CDM (unmapped = CDM gap)
+2. Evaluate Guardrails entities (business entity vs API interface artifact)
+3. For business entities: attributes likely map to ONE CDM entity
+4. For interface artifacts: attributes may distribute across MULTIPLE CDM entities
+5. Add new entities/attributes when gaps identified (with justification)
+6. **NEVER removing or omitting any existing entities or attributes from the Foundation CDM input file**
 
-Enhance the CDM by mapping Guardrails (internal API specifications) fields and identifying gaps.
+The Foundational CDM maintaining all entities and attributes is critical to the full process **YOU MUST PRESERVE THE Foundational CDM**
+- **EVERY entity** from the Foundational CDM input below must appear in your output
+- **EVERY attribute** from the Foundational CDM input must appear in your output
+- **DO NOT SUMMARIZE** or condense the CDM structure itself
 
-**This is Step 2c: Guardrails Refinement** - you are:
-1. Evaluating Guardrails entities (business concept vs interface artifact)
-2. Mapping Guardrails attributes to existing CDM
-3. Adding new entities/attributes ONLY when proper semantic fit exists
-4. Outputting unmapped fields for human review
+**YOUR TASK IS TO MAP ALL KNOWN FIELDS:**
+- MAP all Guardrails fields to existing CDM attributes where proper semantic fit exists
+- If no semantic fit exists, this is a CDM GAP requiring new attribute or entity
+- ADD new Guardrails attributes with justification when gaps identified
+- PRESERVE everything from the Foundational CDM
+
+---
+
+## DECISION FRAMEWORK
+
+To ensure a complete processing of EVERY Guardrails attribute, start at the first attribute in the list and step through EACH AND EVERY attribute, SKIP NONE.
+
+**HOW TO PROCESS:**
+Start with the first Guardrails entity and evaluate it.
+For each entity, determine if business entity or interface artifact.
+Then process each attribute sequentially: field 1, field 2, field 3, etc.
+For each attribute, work through Steps 1-4 below.
+Continue until all attributes processed.
+
+### Step 1: Does the Guardrails attribute map to an attribute in the Foundational CDM?
+
+**Semantic matching criteria:**
+- Same business meaning (not just similar names)
+- Same data domain and usage
+- Reasonable fit (not forced alignment)
+
+**If YES** → add the mapping information in source_mappings.guardrails
+
+**If NO** → Proceed to Step 2
+
+### Step 2: Is it materially important to the CDM's domain?
+
+**⚠️ THIS SHOULD ALMOST NEVER OCCUR** - Guardrails represents known, used production fields.
+
+Ask yourself: Does this attribute materially contribute to the semantic value of the CDM for use in the CDM's domain?
+
+**If NO** → Mark as "unmapped" for human review
+- **WARNING:** This indicates a potential CDM SCOPE PROBLEM
+- Field is used in production but doesn't fit CDM domain
+- Example: Prescriber NPI in Plan & Benefit CDM (belongs in Prescriber CDM)
+- Document why field is out of scope
+
+**If YES** → Proceed to Step 3
+
+### Step 3: Identify target entity for the new attribute
+
+**If proper entity exists in CDM:**
+- Add as extension_attribute on that entity
+
+**If NO proper entity exists:**
+- **CRITICAL CDM GAP:** Production field has no semantic home
+- Consider if this is part of a new entity cluster
+- Check other unmapped Guardrails attributes for patterns
+- If 3+ related attributes → Create extension_entity with justification
+- If isolated → Mark as **unmapped** with note that CDM may be missing entity
+
+### Step 4: Classify disposition
+
+Every Guardrails attribute must be one of:
+1. **mapped** - Direct mapping to existing CDM attribute
+2. **transformed** - Derived/combined from existing CDM attributes
+3. **extension_attribute** - New attribute added to existing entity
+4. **extension_entity** - Part of new entity (if entity needed)
+5. **unmapped** - No proper fit found, requires human review
+
+For clearly OUT-OF-SCOPE attributes (VERY RARE - interface artifacts containing fields outside CDM domain), you MAY:
+- Group them into a summarized disposition rule
+- Example: "Prescriber NPI, DEA from routing_config interface are out of scope for {config.cdm.domain} CDM - belong in Prescriber CDM"
+- Example: "API pagination fields (page_size, offset, limit) are technical interface artifacts not relevant to {config.cdm.domain} CDM"
+- Document the grouping in the disposition report summary
+- **NOTE:** Most Guardrails fields SHOULD map - extensive grouping indicates CDM scope or completeness issues
+
+---
+
+## ENTITY EVALUATION: BUSINESS VS INTERFACE ARTIFACT
+
+**CRITICAL:** Guardrails entities may be API/interface groupings, NOT true business entities.
+
+For each Guardrails entity, evaluate:
+
+**Business Entity:**
+- Represents a real-world business object
+- Persists independently in a database
+- Recognized by business stakeholders as a "thing"
+- Examples: Carrier, Plan, Group, Member
+- **Mapping pattern:** Attributes likely map to ONE corresponding CDM entity
+
+**Interface Artifact:**
+- Groups fields for API request/response structure
+- Not a persisted business concept
+- API plumbing or technical grouping
+- Examples: handler_copay, routing_pcn, pagination_params
+- **Mapping pattern:** Attributes likely DISTRIBUTE across MULTIPLE CDM entities based on semantics
+- **WARNING:** Interface artifacts may contain out-of-domain attributes that don't belong in this CDM
+
+**Actions based on evaluation:**
+
+**If business entity:**
+- Identify corresponding CDM entity (should exist if CDM is complete)
+- Map attributes to that entity
+- If NO corresponding entity exists → CRITICAL CDM GAP, add extension_entity with justification
+
+**If interface artifact:**
+- **Distribute attributes** to appropriate CDM entities based on semantic meaning
+- Example: "handler_copay" attributes distribute to PlanBenefitCostShare, Coverage, etc.
+- **Check for out-of-domain attributes:** Interface artifacts may include fields outside CDM scope (e.g., prescriber fields in Plan & Benefit CDM)
+- Group out-of-domain attributes with justification (RARE)
 
 ---
 
 ## INPUTS
 
-### ENHANCED CDM (from Steps 2a-2b)
+### Foundational CDM (from Step 2B)
+
+**This is the Foundational CDM that was created by Steps 2a and 2b and is entrusted to you to enhance with Guardrails mappings**
+
+This file is structured by CDM Entity then Entity Attributes. Each attribute has source_mappings showing FHIR and NCPDP mappings already completed.
 
 {json.dumps(enhanced_cdm, indent=2)}
 
@@ -77,99 +187,43 @@ Enhance the CDM by mapping Guardrails (internal API specifications) fields and i
   - `business_context`, `api_context`
   - `source_files` (which APIs use this field)
 
+**Structure HINTS for Guardrails files:**
+- Guardrails entities may represent API structures, not always business entities
+- Attributes may be calculated/derived (check `is_calculated` field)
+- API context shows which endpoints use each field
+
 {json.dumps(guardrails, indent=2)}
 
 ---
 
-## CRITICAL: UNDERSTANDING GUARDRAILS "ENTITIES"
+## CRITICAL REQUIREMENTS
 
-**Guardrails entities may be API/interface groupings, NOT true business entities.**
-
-Analysts who create these specs often organize data by interface structure. This means:
-- Some Guardrails "entities" are genuine business concepts (e.g., `carrier`, `plan`, `group`)
-- Others are just API endpoint structures (e.g., `handler_copay`, `routing_pcn`)
-
-**YOUR TASK: Evaluate each Guardrails entity**
-
-For each Guardrails entity, determine:
-1. **Business entity** - Persists independently, recognized by stakeholders as business object
-2. **Interface artifact** - Groups fields for API structure, not a persisted business concept
-
-**Evaluation criteria:**
-- Does it represent a real-world business object?
-- Would business users recognize and discuss this as a "thing"?
-- Or is it just organizing API request/response structure?
-
-**Actions based on evaluation:**
-
-**If business entity:**
-- Check if similar concept exists in CDM
-- If exists → Map attributes to that entity
-- If doesn't exist → Consider as extension_entity
-
-**If interface artifact:**
-- **Focus on attributes, not entity alignment**
-- Distribute attributes to appropriate CDM entities based on semantics
-- Document that Guardrails entity was interface grouping
+1. **PRESERVE EVERYTHING** - To allow following steps to be performed correctly, it is CRITICAL that every entity and attribute from Foundational CDM must appear in output
+2. **MAP ALL GUARDRAILS FIELDS** - These are known, used production fields. Unmapped fields indicate CDM gaps.
+3. **Semantic fit required** - Map FIRST to existing CDM, but mappings must be semantically correct, not forced
+4. **Justify additions** - Every new attribute/entity needs origin.justification explaining the gap being filled
+5. **ACCOUNT FOR ALL ATTRIBUTES** - You MUST account for 100% of Guardrails attributes:
+   - Count total Guardrails attributes in the input
+   - Every attribute must have EITHER detailed disposition OR be part of a grouped rule (rare)
+   - Provide field_accounting reconciliation showing: total_input_attributes = detailed + grouped
+   - If your accounting does NOT equal 100%, you have FAILED the requirement
+6. **Disposition requirements:**
+   - Every Guardrails attribute must have a disposition classification
+   - Out-of-scope grouping should be RARE (indicates CDM scope issues)
+7. **Origin requirements:**
+   - Preserve origin for all existing CDM attributes
+   - Add origin for new attributes/entities
+   - For grouped dispositions, describe the rule
+8. **Output ONLY valid JSON** - No markdown, no code blocks, no commentary
+9. **Processing feedback** - Include a processing_feedback section in your JSON to help improve this process (see output format below)
 
 ---
 
-## DECISION FRAMEWORK: PROPER SEMANTIC MATCHING
+Following is the REQUIRED OUTPUT FORMAT - CRITICAL DO NOT DEVIATE FROM THIS FORMAT
 
-### Step 1: Can attribute map to existing CDM?
+## OUTPUT FORMAT
 
-**Semantic matching criteria:**
-- Same business meaning (not just similar names)
-- Same data domain and usage
-- Reasonable fit (not forced alignment)
-
-**If YES** → MAP IT
-- Example: Guardrails `carrier_code` → CDM `Organization.identifier_value`
-
-**If NO** → Proceed to Step 2
-
-### Step 2: Does attribute need a new location?
-
-**Check if proper entity exists:**
-- Is there a CDM entity that semantically fits this attribute?
-- Would adding this attribute make sense to that entity?
-
-**If proper entity exists** → Add as extension_attribute
-
-**If no proper entity exists:**
-- Could this be part of a new entity cluster?
-- Check other unmapped Guardrails attributes for patterns
-- If 3+ related attributes → Consider extension_entity
-- If isolated → Mark as **unmapped**
-
-### Step 3: Document disposition
-
-**Every Guardrails attribute must be:**
-1. **mapped** - Semantic match to existing CDM attribute
-2. **transformed** - Derived from existing CDM attributes
-3. **extension_attribute** - New attribute added to proper entity
-4. **extension_entity** - Part of new entity (if entity needed)
-5. **unmapped** - No proper fit found, requires human review
-
----
-
-## UNMAPPED FIELDS
-
-**Purpose:** Identify fields that need human decision
-
-**When to mark unmapped:**
-- No semantic match in existing CDM
-- No proper entity exists for this attribute
-- Unclear if new entity warranted
-- Business context ambiguous
-
-**Unmapped fields output to separate JSON file for review**
-
----
-
-## OUTPUT STRUCTURE
-
-Your response must be valid JSON with this structure:
+Return ONLY valid JSON in this structure:
 
 ```json
 {{
@@ -187,26 +241,51 @@ Your response must be valid JSON with this structure:
       "entity_name": "InsurancePlan",
       "classification": "Core",
       "business_definition": "...",
+      "business_context": "...",
+      "key_business_questions": ["..."],
+      "fhir_source_entity": "InsurancePlan",
+      
       "attributes": [
         {{
           "canonical_column": "plan_identifier_value",
           "source_column": "PLAN_IDENTIFIER_VALUE",
           "data_type": "VARCHAR",
-          "size": 50,
+          "size": 100,
           "nullable": false,
           "glossary_term": "...",
           "business_context": "...",
-          "classification": "Identifier",
+          "classification": "Operational",
+          
+          "origin": {{
+            "standard": "fhir",
+            "created_in_step": "2a",
+            "source_path": "InsurancePlan.identifier.value",
+            "source_file": "FHIR_insuranceproduct.profile.json"
+          }},
+          
           "source_mappings": {{
-            "fhir": {{...}},
-            "ncpdp": {{...}},
+            "fhir": {{
+              "path": "InsurancePlan.identifier.value",
+              "fhir_type": "Identifier",
+              "source_files": ["insuranceplan.profile.json"]
+            }},
+            "ncpdp": {{
+              "disposition": "mapped",
+              "standard": "D.0",
+              "segment": "AM07",
+              "field": "Plan_ID",
+              "data_type": "AN",
+              "max_length": 8,
+              "added_in_step": "2b",
+              "mapping_type": "direct"
+            }},
             "guardrails": {{
               "disposition": "mapped",
               "guardrails_entity": "group_plan_enrollment",
               "guardrails_attribute": "plan_id",
               "mapping_type": "direct",
               "added_in_step": "2c",
-              "api_sources": ["Hierarchy_Gen1_API", "Benefit_Modernization_API"]
+              "api_source_files": ["GR_Navitus_DGBee_v1.5_Plan_and_Benefit.xlsx"]
             }},
             "glue": null
           }}
@@ -215,12 +294,16 @@ Your response must be valid JSON with this structure:
     }}
   ],
   
+  "business_capabilities": [],
+  
   "guardrails_disposition_report": {{
     "summary": {{
-      "total_guardrails_entities": 0,
+      "total_guardrails_entities_evaluated": 0,
       "business_entities_identified": 0,
       "interface_artifacts_identified": 0,
       "total_attributes_evaluated": 0,
+      "in_scope_attributes_detailed": 0,
+      "out_of_scope_attributes_grouped": 0,
       "mapped_to_existing_cdm": 0,
       "mapped_via_transformation": 0,
       "extension_attributes_added": 0,
@@ -230,83 +313,77 @@ Your response must be valid JSON with this structure:
     "field_accounting": {{
       "total_input_attributes": 0,
       "detailed_disposition_count": 0,
+      "grouped_disposition_count": 0,
       "total_accounted_for": 0,
       "accounting_complete": true,
-      "note": "Must equal 100%: total_input_attributes = detailed_disposition_count"
+      "note": "Must equal 100%: total_input_attributes = detailed + grouped"
     }},
     "entity_evaluations": [
       {{
         "guardrails_entity": "carrier",
         "evaluation": "business_entity",
-        "reasoning": "Represents insurance carrier organization, persisted business concept",
-        "cdm_alignment": "Mapped to Organization entity",
-        "attributes_count": 5,
-        "attributes_mapped": 4,
-        "attributes_unmapped": 1
-      }},
-      {{
-        "guardrails_entity": "handler_copay",
-        "evaluation": "interface_artifact",
-        "reasoning": "Groups copay calculation logic for API response, not a persisted object",
-        "cdm_alignment": "Distributed attributes to PlanBenefitCostShare",
-        "attributes_count": 3,
-        "attributes_mapped": 3,
-        "attributes_unmapped": 0
+        "reasoning": "Insurance carrier organization, persisted concept recognized by business",
+        "cdm_mapping": "Organization entity"
       }}
     ],
     "details": [
       {{
-        "guardrails_entity": "carrier",
-        "guardrails_attribute": "carrier_code",
+        "guardrails_attribute": "carrier.carrier_code",
         "disposition": "mapped",
         "cdm_target": "Organization.identifier_value",
-        "mapping_type": "semantic_match",
-        "notes": "Primary carrier identifier"
-      }},
-      {{
-        "guardrails_entity": "group_benefit_date_info",
-        "guardrails_attribute": "coverage_start_date",
-        "disposition": "extension_attribute",
-        "cdm_target": "Coverage.coverage_period_start",
-        "mapping_type": "new_attribute",
-        "justification": "Group-level coverage dates not captured in FHIR Coverage"
+        "mapping_type": "direct",
+        "notes": "{config.cdm.domain} relevant - carrier identification"
       }}
     ]
   }},
   
   "unmapped_fields": [
     {{
-      "guardrails_entity": "rate_handler",
-      "guardrails_attribute": "handler_config_json",
+      "guardrails_entity": "routing_configuration",
+      "guardrails_attribute": "routing_algorithm_version",
       "data_type": "string",
-      "description": "JSON configuration for pricing handler",
-      "business_context": "...",
-      "reason_unmapped": "Technical configuration field, unclear if CDM should persist vs runtime only",
-      "recommendation": "Review with architects - may belong in operational config, not analytical CDM"
+      "description": "Version of routing algorithm used",
+      "reason_unmapped": "Technical routing detail, unclear if needed for {config.cdm.domain} CDM or belongs in separate routing domain",
+      "recommendation": "Review with business analyst - may belong in different CDM or not needed"
     }}
-  ]
+  ],
+  
+  "processing_feedback": {{
+    "overall_difficulty": "low | medium | high",
+    "prompt_clarity": {{
+      "rating": "clear | somewhat_clear | confusing",
+      "issues": ["description of any unclear instructions or empty array"]
+    }},
+    "input_quality": {{
+      "foundational_cdm_from_2b": "excellent | good | issues",
+      "guardrails_specifications": "excellent | good | issues",
+      "issues_encountered": ["description of any data quality problems or empty array"]
+    }},
+    "entity_evaluation_challenges": {{
+      "ambiguous_entities": 0,
+      "difficult_decisions": 0,
+      "examples": []
+    }},
+    "mapping_challenges": {{
+      "ambiguous_attributes": 0,
+      "difficult_decisions": 0,
+      "examples": []
+    }},
+    "cdm_gap_analysis": {{
+      "missing_entities_identified": 0,
+      "missing_attributes_identified": 0,
+      "out_of_scope_attributes": 0,
+      "notes": []
+    }},
+    "recommendations": [],
+    "quality_for_downstream": "This section is critical - quality issues here cascade to Steps 2d (Glue), 2e (Final), 3 (Relationships), 4 (DDL), and 5 (Excel). Note any concerns about output quality."
+  }}
 }}
 ```
 
 ---
 
-## CRITICAL REQUIREMENTS
-
-1. **PRESERVE EVERYTHING** - Every entity and attribute from enhanced CDM must appear in output
-2. **EVALUATE ENTITIES** - Determine if Guardrails entity is business concept or interface artifact
-3. **SEMANTIC MATCHING** - Only map when reasonable fit exists (not forced)
-4. **DOCUMENT DECISIONS** - Clear reasoning for entity evaluations and unmapped fields
-5. **ACCOUNT FOR ALL FIELDS** - You MUST account for 100% of Guardrails attributes:
-   - Count total Guardrails attributes in input
-   - Every attribute must have disposition (mapped/transformed/extension/unmapped)
-   - Provide field_accounting showing: total = detailed dispositions
-   - If accounting ≠ 100%, you FAILED
-6. **UNMAPPED OUTPUT** - Fields with no proper fit go to unmapped_fields array
-7. **OUTPUT ONLY VALID JSON** - No markdown, no code blocks, no commentary
-
----
-
-Generate the enhanced CDM JSON with Guardrails mappings now.
+Generate the enhanced Foundational CDM JSON with inclusion of aligned Guardrails mappings.
 """
     
     return prompt
@@ -408,69 +485,179 @@ def run_step2c(
         
         result = json.loads(response_clean)
         
-        # Validate structure
-        if 'entities' not in result:
-            raise ValueError("Response missing 'entities' key")
-        if 'guardrails_disposition_report' not in result:
-            print("  ⚠️  WARNING: Response missing 'guardrails_disposition_report'")
-        
-        # Validate no data loss - CRITICAL
-        input_entity_count = len(enhanced_cdm.get('entities', []))
-        output_entity_count = len(result.get('entities', []))
-        
-        if output_entity_count < input_entity_count:
-            raise ValueError(
-                f"❌ DATA LOSS DETECTED: Output has {output_entity_count} entities "
-                f"but input had {input_entity_count}. "
-                f"LLM removed {input_entity_count - output_entity_count} entities. REJECTING OUTPUT."
-            )
-        
-        input_attr_count = sum(len(e.get('attributes', [])) for e in enhanced_cdm.get('entities', []))
-        output_attr_count = sum(len(e.get('attributes', [])) for e in result.get('entities', []))
-        
-        if output_attr_count < input_attr_count:
-            raise ValueError(
-                f"❌ DATA LOSS DETECTED: Output has {output_attr_count} attributes "
-                f"but input had {input_attr_count}. "
-                f"LLM removed {input_attr_count - output_attr_count} attributes. REJECTING OUTPUT."
-            )
-        
-        # Validate field accounting - CRITICAL
-        total_gr_attrs = sum(len(e.get('attributes', [])) for e in guardrails.get('rationalized_entities', []))
-        
-        if total_gr_attrs > 0:
-            field_accounting = result.get('guardrails_disposition_report', {}).get('field_accounting', {})
-            if field_accounting:
-                accounted = field_accounting.get('total_accounted_for', 0)
-                if accounted != total_gr_attrs:
-                    print(f"  ⚠️  WARNING: Field accounting incomplete")
-                    print(f"     Total Guardrails attributes: {total_gr_attrs}")
-                    print(f"     Attributes accounted for: {accounted}")
-                    print(f"     Missing: {total_gr_attrs - accounted} attributes")
-                else:
-                    print(f"  ✓ Field accounting complete: {accounted}/{total_gr_attrs} attributes")
-            else:
-                print(f"  ⚠️  WARNING: No field_accounting section in disposition report")
-        
-        print(f"  ✓ Validation passed: No data loss detected")
-        
-        # Extract enhanced CDM and unmapped fields
-        enhanced_cdm_output = {k: v for k, v in result.items() if k != 'unmapped_fields'}
-        unmapped_fields = result.get('unmapped_fields', [])
-        
-        # Save enhanced CDM
+        # Generate timestamp for all output files
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         domain_safe = config.cdm.domain.replace(' ', '_')
         
+        # Extract and save processing feedback to separate file
+        feedback = result.pop('processing_feedback', None)
+        if feedback:
+            feedback_file = outdir / f"step2c_feedback_{domain_safe}_{timestamp}.txt"
+            
+            with open(feedback_file, 'w', encoding='utf-8') as f:
+                f.write(f"STEP 2C PROCESSING FEEDBACK\n")
+                f.write(f"Generated: {datetime.now().isoformat()}\n")
+                f.write(f"Domain: {config.cdm.domain}\n")
+                f.write(f"=" * 80 + "\n\n")
+                
+                f.write(f"OVERALL DIFFICULTY: {feedback.get('overall_difficulty', 'not provided')}\n\n")
+                
+                prompt_clarity = feedback.get('prompt_clarity', {})
+                f.write(f"PROMPT CLARITY: {prompt_clarity.get('rating', 'not provided')}\n")
+                if prompt_clarity.get('issues'):
+                    for issue in prompt_clarity['issues']:
+                        f.write(f"  - {issue}\n")
+                f.write("\n")
+                
+                input_quality = feedback.get('input_quality', {})
+                f.write(f"INPUT QUALITY:\n")
+                f.write(f"  Enhanced CDM from 2B: {input_quality.get('foundational_cdm_from_2b', 'not provided')}\n")
+                f.write(f"  Guardrails Specs: {input_quality.get('guardrails_specifications', 'not provided')}\n")
+                if input_quality.get('issues_encountered'):
+                    f.write(f"  Issues:\n")
+                    for issue in input_quality['issues_encountered']:
+                        f.write(f"    - {issue}\n")
+                f.write("\n")
+                
+                entity_challenges = feedback.get('entity_evaluation_challenges', {})
+                f.write(f"ENTITY EVALUATION CHALLENGES:\n")
+                f.write(f"  Ambiguous entities: {entity_challenges.get('ambiguous_entities', 0)}\n")
+                f.write(f"  Difficult decisions: {entity_challenges.get('difficult_decisions', 0)}\n")
+                if entity_challenges.get('examples'):
+                    f.write(f"\n  Examples:\n")
+                    for example in entity_challenges['examples']:
+                        f.write(f"\n  {example.get('entity_name', 'N/A')}\n")
+                        f.write(f"    Issue: {example.get('issue', 'N/A')}\n")
+                        f.write(f"    Decision: {example.get('decision', 'N/A')}\n")
+                        f.write(f"    Confidence: {example.get('confidence', 'N/A')}\n")
+                f.write("\n")
+                
+                mapping_challenges = feedback.get('mapping_challenges', {})
+                f.write(f"MAPPING CHALLENGES:\n")
+                f.write(f"  Ambiguous attributes: {mapping_challenges.get('ambiguous_attributes', 0)}\n")
+                f.write(f"  Difficult decisions: {mapping_challenges.get('difficult_decisions', 0)}\n")
+                if mapping_challenges.get('examples'):
+                    f.write(f"\n  Examples:\n")
+                    for example in mapping_challenges['examples']:
+                        f.write(f"\n  {example.get('attribute', 'N/A')}\n")
+                        f.write(f"    Issue: {example.get('issue', 'N/A')}\n")
+                        f.write(f"    Decision: {example.get('decision', 'N/A')}\n")
+                        f.write(f"    Confidence: {example.get('confidence', 'N/A')}\n")
+                f.write("\n")
+                
+                gap_analysis = feedback.get('cdm_gap_analysis', {})
+                f.write(f"CDM GAP ANALYSIS:\n")
+                f.write(f"  Missing entities identified: {gap_analysis.get('missing_entities_identified', 0)}\n")
+                f.write(f"  Missing attributes identified: {gap_analysis.get('missing_attributes_identified', 0)}\n")
+                f.write(f"  Out of scope attributes: {gap_analysis.get('out_of_scope_attributes', 0)}\n")
+                if gap_analysis.get('notes'):
+                    f.write(f"  Notes:\n")
+                    for note in gap_analysis['notes']:
+                        f.write(f"    - {note}\n")
+                f.write("\n")
+                
+                recommendations = feedback.get('recommendations', [])
+                if recommendations:
+                    f.write(f"RECOMMENDATIONS:\n")
+                    for i, rec in enumerate(recommendations, 1):
+                        f.write(f"  {i}. {rec}\n")
+                    f.write("\n")
+                
+                quality_note = feedback.get('quality_for_downstream', '')
+                if quality_note:
+                    f.write(f"QUALITY FOR DOWNSTREAM STEPS:\n")
+                    f.write(f"  {quality_note}\n")
+            
+            print(f"  📝 Feedback saved: {feedback_file}")
+        
+        # Extract and save disposition report to separate file
+        disposition_report = result.pop('guardrails_disposition_report', None)
+        if disposition_report:
+            disp_file = outdir / f"guardrails_disposition_report_{domain_safe}_{timestamp}.json"
+            with open(disp_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "domain": config.cdm.domain,
+                    "step": "2c",
+                    "timestamp": timestamp,
+                    "disposition_report": disposition_report
+                }, f, indent=2)
+            print(f"  📋 Disposition report saved: {disp_file}")
+        else:
+            print("  ⚠️  WARNING: Response missing 'guardrails_disposition_report'")
+        
+        # Extract unmapped fields (keep separate)
+        unmapped_fields = result.pop('unmapped_fields', [])
+        
+        # Now result contains only clean CDM (entities + metadata)
+        enhanced_cdm_output = result
+        
+        # Validate structure
+        if 'entities' not in enhanced_cdm_output:
+            print(f"  ❌ ERROR: Response missing 'entities' key")
+            # Save anyway for debugging
+            output_file = outdir / f"enhanced_cdm_guardrails_{domain_safe}_{timestamp}.json"
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(enhanced_cdm_output, f, indent=2)
+            print(f"  💾 Output saved for review: {output_file}")
+            return enhanced_cdm_output
+        
+        # Validate no data loss - CRITICAL
+        input_entity_count = len(enhanced_cdm.get('entities', []))
+        output_entity_count = len(enhanced_cdm_output.get('entities', []))
+        
+        if output_entity_count < input_entity_count:
+            print(f"  ❌ DATA LOSS: {output_entity_count} entities vs {input_entity_count} expected")
+            print(f"  ⚠️  LLM removed {input_entity_count - output_entity_count} entities")
+            # Save anyway for debugging
+            output_file = outdir / f"enhanced_cdm_guardrails_{domain_safe}_{timestamp}.json"
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(enhanced_cdm_output, f, indent=2)
+            print(f"  💾 Output saved for review: {output_file}")
+            return enhanced_cdm_output
+        
+        input_attr_count = sum(len(e.get('attributes', [])) for e in enhanced_cdm.get('entities', []))
+        output_attr_count = sum(len(e.get('attributes', [])) for e in enhanced_cdm_output.get('entities', []))
+        
+        if output_attr_count < input_attr_count:
+            print(f"  ❌ DATA LOSS: {output_attr_count} attributes vs {input_attr_count} expected")
+            print(f"  ⚠️  LLM removed {input_attr_count - output_attr_count} attributes")
+            # Save anyway for debugging
+            output_file = outdir / f"enhanced_cdm_guardrails_{domain_safe}_{timestamp}.json"
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(enhanced_cdm_output, f, indent=2)
+            print(f"  💾 Output saved for review: {output_file}")
+            return enhanced_cdm_output
+        
+        print(f"  ✓ Validation passed: No data loss detected")
+        
+        # Field accounting validation (if disposition report available)
+        if disposition_report:
+            total_gr_attrs = sum(len(e.get('attributes', [])) for e in guardrails.get('rationalized_entities', []))
+            
+            if total_gr_attrs > 0:
+                field_accounting = disposition_report.get('field_accounting', {})
+                if field_accounting:
+                    accounted = field_accounting.get('total_accounted_for', 0)
+                    if accounted != total_gr_attrs:
+                        print(f"  ⚠️  WARNING: Field accounting incomplete")
+                        print(f"     Total Guardrails attributes: {total_gr_attrs}")
+                        print(f"     Attributes accounted for: {accounted}")
+                        print(f"     Missing: {total_gr_attrs - accounted} attributes")
+                    else:
+                        print(f"  ✓ Field accounting complete: {accounted}/{total_gr_attrs} attributes")
+                else:
+                    print(f"  ⚠️  WARNING: No field_accounting section in disposition report")
+        
+        # Save clean enhanced CDM (without disposition report and feedback)
         cdm_file = outdir / f"enhanced_cdm_guardrails_{domain_safe}_{timestamp}.json"
         with open(cdm_file, 'w', encoding='utf-8') as f:
             json.dump(enhanced_cdm_output, f, indent=2)
         
+        print(f"  ✓ Clean CDM saved: {cdm_file}")
+        
         entity_count = len(enhanced_cdm_output.get('entities', []))
         total_attrs = sum(len(e.get('attributes', [])) for e in enhanced_cdm_output.get('entities', []))
         
-        print(f"  ✓ Enhanced CDM generated")
-        print(f"  📁 Output: {cdm_file}")
         print(f"  📊 Entities: {entity_count}")
         print(f"  📊 Total attributes: {total_attrs}")
         
@@ -490,19 +677,19 @@ def run_step2c(
         else:
             print(f"  ✓ All fields mapped - no unmapped output")
         
-        # Report disposition summary
-        disp = enhanced_cdm_output.get('guardrails_disposition_report', {}).get('summary', {})
-        
-        if disp:
-            print(f"\n  📋 Guardrails Disposition:")
-            print(f"     Total entities: {disp.get('total_guardrails_entities', 0)}")
-            print(f"     Business entities: {disp.get('business_entities_identified', 0)}")
-            print(f"     Interface artifacts: {disp.get('interface_artifacts_identified', 0)}")
-            print(f"     Attributes evaluated: {disp.get('total_attributes_evaluated', 0)}")
-            print(f"     Mapped to existing: {disp.get('mapped_to_existing_cdm', 0)}")
-            print(f"     New attributes: {disp.get('extension_attributes_added', 0)}")
-            print(f"     New entities: {disp.get('extension_entities_added', 0)}")
-            print(f"     Unmapped: {disp.get('unmapped_for_review', 0)}")
+        # Report disposition summary if available
+        if disposition_report:
+            disp = disposition_report.get('summary', {})
+            if disp:
+                print(f"\n  📋 Guardrails Disposition:")
+                print(f"     Total entities: {disp.get('total_guardrails_entities_evaluated', 0)}")
+                print(f"     Business entities: {disp.get('business_entities_identified', 0)}")
+                print(f"     Interface artifacts: {disp.get('interface_artifacts_identified', 0)}")
+                print(f"     Attributes evaluated: {disp.get('total_attributes_evaluated', 0)}")
+                print(f"     Mapped to existing: {disp.get('mapped_to_existing_cdm', 0)}")
+                print(f"     New attributes: {disp.get('extension_attributes_added', 0)}")
+                print(f"     New entities: {disp.get('extension_entities_added', 0)}")
+                print(f"     Unmapped: {disp.get('unmapped_for_review', 0)}")
         
         return enhanced_cdm_output
         
@@ -512,12 +699,13 @@ def run_step2c(
         
         # Save failed response for debugging
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        error_file = outdir / f"step2c_error_response_{timestamp}.txt"
+        domain_safe = config.cdm.domain.replace(' ', '_')
+        error_file = outdir / f"step2c_error_response_{domain_safe}_{timestamp}.txt"
         with open(error_file, 'w', encoding='utf-8') as f:
             f.write(response)
         print(f"  💾 Full response saved to: {error_file}")
         
-        raise
+        return None
     except ValueError as e:
         print(f"  ❌ ERROR: {e}")
-        raise
+        return None

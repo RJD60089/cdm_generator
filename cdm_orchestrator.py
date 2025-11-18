@@ -304,7 +304,30 @@ Examples:
                 # Step 2c: Guardrails Refinement
                 if run_2c:
                     print(f"\n=== Step 2c: Guardrails Refinement ===")
-                    print("Step 2c not yet implemented")
+                    
+                    # Find most recent enhanced CDM from Step 2b (or foundation from 2a if 2b not run)
+                    enhanced_files = sorted(cdm_outdir.glob("enhanced_cdm_ncpdp_*.json"))
+                    if enhanced_files:
+                        latest_enhanced = enhanced_files[-1]
+                        print(f"  📁 Using enhanced CDM from Step 2b: {latest_enhanced.name}")
+                    else:
+                        # Fall back to foundation CDM if 2b wasn't run
+                        foundation_files = sorted(cdm_outdir.glob("foundation_cdm_*.json"))
+                        if not foundation_files:
+                            print("  ❌ ERROR: No foundation or enhanced CDM found. Run Step 2a or 2b first.")
+                            sys.exit(1)
+                        latest_enhanced = foundation_files[-1]
+                        print(f"  📁 Using foundation CDM (2b not run): {latest_enhanced.name}")
+                    
+                    from src.steps.step2c_guardrails_refinement import run_step2c
+                    
+                    run_step2c(
+                        config=config,
+                        enhanced_cdm_file=latest_enhanced,
+                        outdir=cdm_outdir,
+                        llm=llm if not dry_run else None,
+                        dry_run=dry_run
+                    )
                 
                 # Step 2d: Glue Refinement
                 if run_2d:
