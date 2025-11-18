@@ -22,6 +22,362 @@ from src.core.llm_client import LLMClient
 def build_prompt(config: AppConfig, foundation_cdm: dict, ncpdp_standards: dict) -> str:
     """Build Step 2b prompt for NCPDP refinement"""
     
+    prompt = f"""You are an expert healthcare data modeler specializing in PBM, FHIR, and NCPDP standards.
+
+Your task is to map a list of NCPDP fields and align it with a foundational canonical data model (CDM) based on FHIR resources.
+
+The objective is to augment the original foundational CDM with mapping information to the NCPDP fields.
+
+This task is one step out of many to produce an enterprise CDM core to the Enterprise Data Platform.
+
+A previous step refined the list of NCPDP fields to those NCPDP Standards that best align to this CDM's Domain (below).
+
+Following steps will include further refinement and establishing the Entity relationships - your focus in this step is to ensure that all semantically appropriate NCPDP fields are mapped to the Foundational CDM or in rare occasions added to the Foundational CDM.
+
+This process as well as this prompt can be used for any CDM creation, the specific context for the CDM to be processed is below:
+
+## CDM CONTEXT
+
+**Domain:** {config.cdm.domain} - IMPORTANT TO REMEMBER THIS - WILL BE REFERENCED SEVERAL TIMES BELOW
+
+**Description:** {config.cdm.description}
+
+Overview of the approach for this task:
+1. Map NCPDP fields to existing CDM attributes
+2. Adding NCPDP-specific attributes ONLY when justified and no CDM equivalent exists
+3. Generating disposition report: detailed for in-scope fields, grouped rules for out-of-scope
+4. **NEVER removing or omitting any existing entities or attributes**
+
+The Foundational CDM maintaining all entities and attributes is critical to the full process **YOU MUST PRESERVE THE FOUNDATIONAL CDM**
+- **EVERY entity** from the foundation CDM input below must appear in your output
+- **EVERY attribute** from the foundation CDM input must appear in your output
+- **DO NOT SUMMARIZE** or condense the CDM structure itself
+
+**YOUR TASK IS TO ADD, NOT SUBTRACT:**
+- ADD the NCPDP mappings that align with the provided Foundational FHIR attributes
+- It is expected that most NCPDP fields WILL map to the Foundation FHIR Entities and Attributes - ONLY ADD new NCPDP to the Foundational CDM when there is no match and there is semantic value relative to the CDM's DOMAIN
+
+---
+
+## DECISION FRAMEWORK
+
+To ensure a complete processing of EVERY NCPDP field, start at the first field in the list and step through EACH AND EVERY NCPDP field, SKIP NONE.
+
+**HOW TO PROCESS:**
+Start with the first NCPDP field in the provided list.
+Process sequentially: field 1, field 2, field 3, etc.
+For each field, work through Steps 1-4 below.
+Continue until all fields processed.
+
+### Step 1: Does the NCPDP field map to a field in the FHIR based Foundation CDM?
+
+**If YES** → add the mapping information that provides the alignment from the Foundational CDM to NCPDP fields
+
+**If NO** → Proceed to Step 2
+
+### Step 2: Is it materially important to PBM operations?
+
+Ask yourself: Does this field materially contribute to the semantic value of the CDM for use in the CDM's domain?
+
+**If NO** → Mark as "not_used" with justification
+**If YES** → Proceed to Step 3
+
+### Step 3: Add the new field within the appropriate Foundation CDM entity
+
+### Step 4: Classify disposition
+
+Every IN-SCOPE NCPDP field ({config.cdm.domain} relevant) must be one of:
+1. **mapped** - Direct mapping to existing CDM attribute
+2. **transformed** - Derived/combined from existing CDM attributes
+3. **extension_attribute** - New attribute added to existing entity
+4. **not_used** - Field not needed (with business justification)
+
+For clearly OUT-OF-SCOPE fields, you MUST:
+- Group them into a summarized disposition rule
+- Example: "All SCRIPT message-header fields (MessageID, SentTime, etc.) are not_used for {config.cdm.domain} CDM"
+- Document the grouping in the disposition report summary
+
+---
+
+## INPUTS
+
+### FOUNDATIONAL FHIR BASED CDM
+**This is the Foundation CDM that was created by several previous steps and is entrusted to you to enhance with NCPDP field alignment**
+This file is structured by CDM Entity then Entity Attributes. Each field has a set of metadata that can be used with the NCPDP field metadata to complete mappings.
+
+{json.dumps(foundation_cdm, indent=2)}
+
+---
+
+### NCPDP FIELDS SELECTED IN PREVIOUS STEP BASED ON CDM'S DOMAIN
+
+**Structure HINTS for NCPDP files:**
+- `_columns`: Explains what each abbreviated key means (i=FIELD, n=NAME, d=DEFINITION, etc.)
+- `_standards`: Lookup table for standard codes (T=Telecommunication, A=Post Adjudication, etc.)
+- `fields`: Array of select NCPDP fields based on CDM domain
+  - Each field has `s` property listing which standards the NCPDP field is used in (e.g., "T,A" = used in Telecom & Post Adjudication)
+
+"""
+    
+    # Add NCPDP General standards if present
+    if ncpdp_standards.get('general'):
+        prompt += f"""
+**'GENERAL' includes NCPDP Fields from select NCPDP Standards excluding SCRIPT and SPECIALIZED:**
+This file has only one instance of each field and has been scoped to the NCPDP Standards that are most appropriate for the CDM's Domain.
+
+{json.dumps(ncpdp_standards['general'], indent=2)}
+"""
+    
+    # Add NCPDP Script standards if present
+    if ncpdp_standards.get('script'):
+        prompt += f"""
+**'SCRIPT' includes NCPDP Fields from SCRIPT and SPECIALIZED:**
+This file has only one instance of each field and has been scoped to the NCPDP Standards that are most appropriate for the CDM's Domain.
+
+{json.dumps(ncpdp_standards['script'], indent=2)}
+"""
+    
+    prompt += """
+---
+
+## CRITICAL REQUIREMENTS
+
+1. **PRESERVE EVERYTHING** - To allow following steps to be performed correctly, it is CRITICAL that every entity and attribute from foundation CDM must appear in output
+2. **Focus on in-scope fields** - Prioritize the CDM's Domain relevant NCPDP fields for detailed disposition
+3. **Map FIRST** - Try to map every relevant NCPDP field to existing FHIR based CDM field
+4. **Justify additions** - Every new attribute/entity needs origin.justification explaining why mapping impossible
+5. **ACCOUNT FOR ALL FIELDS** - You MUST account for 100% of NCPDP fields:
+   - Count total NCPDP fields in the input
+   - Every field must have EITHER detailed disposition OR be part of a grouped rule
+   - Provide field_accounting reconciliation showing: total_input_fields = detailed + grouped
+   - If your accounting does NOT equal 100%, you have FAILED the requirement
+6. **Disposition requirements:**
+   - Every IN-SCOPE NCPDP field must have a disposition classification
+   - For OUT-OF-SCOPE fields, you MAY:
+     - Define one or more grouped rules (e.g., "All prescriber-only identifiers = not_used for Plan & Benefit CDM")
+     - You do NOT need to list every one individually
+7. **Origin requirements:**
+   - Preserve origin for all existing CDM attributes
+   - Add origin for new attributes/entities
+   - For grouped or summarized dispositions, it is sufficient to describe the rule, not each field
+8. **Output ONLY valid JSON** - No markdown, no code blocks, no commentary
+9. **Processing feedback** - Include a processing_feedback section in your JSON to help improve this process (see output format below)
+
+---
+
+Following is the REQUIRED OUTPUT FORMAT - CRITICAL DO NOT DEVIATE FROM THIS FORMAT
+
+## OUTPUT FORMAT
+
+Return ONLY valid JSON in this structure:
+
+```json
+{
+  "cdm_metadata": {
+    "domain": "Plan and Benefit",
+    "version": "1.0",
+    "description": "...",
+    "foundation_standard": "FHIR",
+    "generation_timestamp": "ISO_DATETIME",
+    "generation_steps_completed": ["2a", "2b"]
+  },
+  
+  "entities": [
+    {
+      "entity_name": "InsurancePlan",
+      "classification": "Core",
+      "business_definition": "...",
+      "business_context": "...",
+      "key_business_questions": ["..."],
+      "fhir_source_entity": "InsurancePlan",
+      
+      "primary_key": {
+        "type": "natural",
+        "attributes": ["plan_identifier_value"]
+      },
+      
+      "foreign_keys": [
+        {
+          "name": "fk_plan_product",
+          "attributes": ["insurance_product_id"],
+          "references_entity": "InsuranceProduct",
+          "references_attributes": ["product_identifier_value"],
+          "on_delete": "RESTRICT",
+          "on_update": "CASCADE"
+        }
+      ],
+      
+      "attributes": [
+        {
+          "canonical_column": "plan_identifier_value",
+          "source_column": "PLAN_IDENTIFIER_VALUE",
+          "data_type": "VARCHAR",
+          "size": 100,
+          "nullable": false,
+          "glossary_term": "...",
+          "business_context": "...",
+          "classification": "Operational",
+          
+          "origin": {
+            "standard": "fhir",
+            "created_in_step": "2a",
+            "source_path": "InsurancePlan.identifier.value",
+            "source_file": "insuranceplan.profile.json"
+          },
+          
+          "source_mappings": {
+            "fhir": {
+              "path": "InsurancePlan.identifier.value",
+              "fhir_type": "Identifier",
+              "source_files": ["insuranceplan.profile.json"]
+            },
+            "ncpdp": {
+              "disposition": "mapped",
+              "standard": "D.0",
+              "segment": "AM07",
+              "field": "Plan_ID",
+              "data_type": "AN",
+              "max_length": 8,
+              "added_in_step": "2b",
+              "mapping_type": "direct"
+            },
+            "guardrails": null,
+            "glue": null
+          }
+        },
+        {
+          "canonical_column": "dispense_as_written_code",
+          "source_column": "DISPENSE_AS_WRITTEN_CODE",
+          "data_type": "VARCHAR",
+          "size": 2,
+          "nullable": true,
+          "glossary_term": "DAW code indicating prescriber intent for substitution...",
+          "business_context": "Required for adjudication to determine if generic substitution allowed...",
+          "classification": "Operational",
+          
+          "origin": {
+            "standard": "ncpdp",
+            "created_in_step": "2b",
+            "source_path": "D.0.420-DK.DAW_Product_Selection_Code",
+            "source_file": "ncpdp_general.json",
+            "justification": "Pharmacy-specific code with no FHIR equivalent, critical for adjudication and pricing"
+          },
+          
+          "source_mappings": {
+            "fhir": null,
+            "ncpdp": {
+              "disposition": "extension_attribute",
+              "standard": "D.0",
+              "segment": "420-DK",
+              "field": "DAW_Product_Selection_Code",
+              "data_type": "N",
+              "max_length": 1,
+              "added_in_step": "2b",
+              "valid_values": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            },
+            "guardrails": null,
+            "glue": null
+          }
+        }
+      ]
+    }
+  ],
+  
+  "business_capabilities": [],
+  
+  "ncpdp_disposition_report": {
+    "summary": {
+      "total_ncpdp_fields_evaluated": 0,
+      "in_scope_fields_detailed": 0,
+      "out_of_scope_fields_grouped": 0,
+      "mapped_to_existing_cdm": 0,
+      "mapped_via_transformation": 0,
+      "extension_attributes_added": 0,
+      "extension_entities_added": 0,
+      "not_used": 0
+    },
+    "field_accounting": {
+      "total_input_fields": 0,
+      "detailed_disposition_count": 0,
+      "grouped_disposition_count": 0,
+      "total_accounted_for": 0,
+      "accounting_complete": true,
+      "note": "Must equal 100%: total_input_fields = detailed + grouped"
+    },
+    "details": [
+      {
+        "ncpdp_field": "302-C2.Cardholder_ID",
+        "disposition": "mapped",
+        "cdm_target": "Coverage.subscriber_id",
+        "mapping_type": "direct",
+        "notes": "Plan & Benefit relevant - member identification"
+      },
+      {
+        "ncpdp_field": "512-FC.Accumulated_Deductible_Amount",
+        "disposition": "extension_attribute",
+        "cdm_target": "Coverage.deductible_accumulated",
+        "mapping_type": "new_attribute",
+        "justification": "Pharmacy-specific accumulator, no FHIR equivalent, required for benefit stage tracking"
+      },
+      {
+        "disposition_group": "prescriber_identifiers",
+        "disposition": "not_used",
+        "fields_count": 15,
+        "example_fields": ["401-D1.Prescriber_ID", "411-DB.Prescriber_Last_Name", "427-DR.DEA_Number"],
+        "justification": "Prescriber entity outside Plan & Benefit CDM scope - belongs in Prescriber CDM"
+      },
+      {
+        "disposition_group": "dur_clinical_details",
+        "disposition": "not_used",
+        "fields_count": 25,
+        "example_fields": ["473-7E.DUR_Service_Reason_Code", "439-E4.Reason_For_Service_Code"],
+        "justification": "Clinical DUR details out of scope for Plan & Benefit - belongs in Utilization Management CDM"
+      }
+    ]
+  },
+  
+  "processing_feedback": {
+    "overall_difficulty": "low | medium | high",
+    "prompt_clarity": {
+      "rating": "clear | somewhat_clear | confusing",
+      "issues": ["description of any unclear instructions or empty array"]
+    },
+    "input_quality": {
+      "foundation_cdm": "excellent | good | issues",
+      "ncpdp_standards": "excellent | good | issues",
+      "issues_encountered": ["description of any data quality problems or empty array"]
+    },
+    "mapping_challenges": {
+      "ambiguous_fields": 0,
+      "difficult_decisions": 0,
+      "examples": [
+        {
+          "field_id": "XXX-YY",
+          "field_name": "Field Name",
+          "issue": "Description of why this was difficult to map",
+          "decision": "How you resolved it",
+          "confidence": "high | medium | low"
+        }
+      ]
+    },
+    "recommendations": [
+      "Specific suggestions for improving prompt or process",
+      "Additional context that would have been helpful",
+      "Gaps in foundation CDM structure that affected mapping"
+    ],
+    "quality_for_downstream": "This section is critical - quality issues here cascade to Steps 2c (Guardrails), 3 (Relationships), 4 (DDL), and 5 (Excel). Note any concerns about output quality."
+  }
+}
+```
+
+---
+
+Generate the enhanced Foundational CDM JSON with inclusion of aligned NCPDP FIELDS.
+"""
+    
+    return prompt
+    """Build Step 2b prompt for NCPDP refinement"""
+    
     # Build NCPDP section with context
     ncpdp_section = "### NCPDP STANDARDS (Flattened Format)\n\n"
     
@@ -652,9 +1008,82 @@ def run_step2b(
         
         enhanced_cdm = json.loads(response_clean)
         
+        # Extract and save processing feedback to separate file
+        feedback = enhanced_cdm.get('processing_feedback')
+        if feedback:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            domain_safe = config.cdm.domain.replace(' ', '_')
+            feedback_file = outdir / f"step2b_feedback_{domain_safe}_{timestamp}.txt"
+            
+            with open(feedback_file, 'w', encoding='utf-8') as f:
+                f.write(f"STEP 2B PROCESSING FEEDBACK\n")
+                f.write(f"Generated: {datetime.now().isoformat()}\n")
+                f.write(f"Domain: {config.cdm.domain}\n")
+                f.write(f"=" * 80 + "\n\n")
+                
+                f.write(f"OVERALL DIFFICULTY: {feedback.get('overall_difficulty', 'not provided')}\n\n")
+                
+                prompt_clarity = feedback.get('prompt_clarity', {})
+                f.write(f"PROMPT CLARITY: {prompt_clarity.get('rating', 'not provided')}\n")
+                if prompt_clarity.get('issues'):
+                    for issue in prompt_clarity['issues']:
+                        f.write(f"  - {issue}\n")
+                f.write("\n")
+                
+                input_quality = feedback.get('input_quality', {})
+                f.write(f"INPUT QUALITY:\n")
+                f.write(f"  Foundation CDM: {input_quality.get('foundation_cdm', 'not provided')}\n")
+                f.write(f"  NCPDP Standards: {input_quality.get('ncpdp_standards', 'not provided')}\n")
+                if input_quality.get('issues_encountered'):
+                    f.write(f"  Issues:\n")
+                    for issue in input_quality['issues_encountered']:
+                        f.write(f"    - {issue}\n")
+                f.write("\n")
+                
+                mapping_challenges = feedback.get('mapping_challenges', {})
+                f.write(f"MAPPING CHALLENGES:\n")
+                f.write(f"  Ambiguous fields: {mapping_challenges.get('ambiguous_fields', 0)}\n")
+                f.write(f"  Difficult decisions: {mapping_challenges.get('difficult_decisions', 0)}\n")
+                if mapping_challenges.get('examples'):
+                    f.write(f"\n  Examples:\n")
+                    for example in mapping_challenges['examples']:
+                        f.write(f"\n  {example.get('field_id', 'N/A')} - {example.get('field_name', 'N/A')}\n")
+                        f.write(f"    Issue: {example.get('issue', 'N/A')}\n")
+                        f.write(f"    Decision: {example.get('decision', 'N/A')}\n")
+                        f.write(f"    Confidence: {example.get('confidence', 'N/A')}\n")
+                f.write("\n")
+                
+                recommendations = feedback.get('recommendations', [])
+                if recommendations:
+                    f.write(f"RECOMMENDATIONS:\n")
+                    for i, rec in enumerate(recommendations, 1):
+                        f.write(f"  {i}. {rec}\n")
+                    f.write("\n")
+                
+                quality_note = feedback.get('quality_for_downstream', '')
+                if quality_note:
+                    f.write(f"QUALITY FOR DOWNSTREAM STEPS:\n")
+                    f.write(f"  {quality_note}\n")
+            
+            print(f"  📝 Feedback saved: {feedback_file}")
+            
+            # Remove feedback from CDM output (keep CDM clean)
+            del enhanced_cdm['processing_feedback']
+        
+        # Save output BEFORE validation for debugging
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        domain_safe = config.cdm.domain.replace(' ', '_')
+        output_file = outdir / f"enhanced_cdm_ncpdp_{domain_safe}_{timestamp}.json"
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(enhanced_cdm, f, indent=2)
+        
+        print(f"  💾 Output saved: {output_file}")
+        
         # Validate structure
         if 'entities' not in enhanced_cdm:
-            raise ValueError("Response missing 'entities' key")
+            print(f"  ❌ ERROR: Response missing 'entities' key")
+            return enhanced_cdm
         if 'ncpdp_disposition_report' not in enhanced_cdm:
             print("  ⚠️  WARNING: Response missing 'ncpdp_disposition_report'")
         
@@ -663,23 +1092,21 @@ def run_step2b(
         enhanced_entity_count = len(enhanced_cdm.get('entities', []))
         
         if enhanced_entity_count < foundation_entity_count:
-            raise ValueError(
-                f"❌ DATA LOSS DETECTED: Enhanced CDM has {enhanced_entity_count} entities "
-                f"but foundation had {foundation_entity_count}. "
-                f"LLM removed {foundation_entity_count - enhanced_entity_count} entities. REJECTING OUTPUT."
-            )
+            print(f"  ❌ DATA LOSS: {enhanced_entity_count} entities vs {foundation_entity_count} expected")
+            print(f"  ⚠️  OUTPUT SAVED FOR REVIEW: {output_file}")
+            return enhanced_cdm
         
         foundation_attr_count = sum(len(e.get('attributes', [])) for e in foundation_cdm.get('entities', []))
         enhanced_attr_count = sum(len(e.get('attributes', [])) for e in enhanced_cdm.get('entities', []))
         
         if enhanced_attr_count < foundation_attr_count:
-            raise ValueError(
-                f"❌ DATA LOSS DETECTED: Enhanced CDM has {enhanced_attr_count} attributes "
-                f"but foundation had {foundation_attr_count}. "
-                f"LLM removed {foundation_attr_count - enhanced_attr_count} attributes. REJECTING OUTPUT."
-            )
+            print(f"  ❌ DATA LOSS: {enhanced_attr_count} attributes vs {foundation_attr_count} expected")
+            print(f"  ⚠️  OUTPUT SAVED FOR REVIEW: {output_file}")
+            return enhanced_cdm
         
-        # Validate field accounting - CRITICAL
+        print(f"  ✓ Validation passed: No data loss detected")
+        
+        # Field accounting validation
         total_ncpdp_fields = 0
         if ncpdp_standards.get('general'):
             total_ncpdp_fields += len(ncpdp_standards['general'].get('fields', []))
@@ -700,27 +1127,15 @@ def run_step2b(
             else:
                 print(f"  ⚠️  WARNING: No field_accounting section in disposition report")
         
-        print(f"  ✓ Validation passed: No data loss detected")
-        
-        # Save output
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        domain_safe = config.cdm.domain.replace(' ', '_')
-        output_file = outdir / f"enhanced_cdm_ncpdp_{domain_safe}_{timestamp}.json"
-        
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(enhanced_cdm, f, indent=2)
-        
+        # Report results
         entity_count = len(enhanced_cdm.get('entities', []))
         total_attrs = sum(len(e.get('attributes', [])) for e in enhanced_cdm.get('entities', []))
         
-        # Report disposition summary
+        print(f"  📊 Output entities: {entity_count}")
+        print(f"  📊 Output attributes: {total_attrs}")
+        
+        # Report disposition summary if present
         disp = enhanced_cdm.get('ncpdp_disposition_report', {}).get('summary', {})
-        
-        print(f"  ✓ Enhanced CDM generated")
-        print(f"  📁 Output: {output_file}")
-        print(f"  📊 Entities: {entity_count}")
-        print(f"  📊 Total attributes: {total_attrs}")
-        
         if disp:
             print(f"\n  📋 NCPDP Disposition:")
             print(f"     Total NCPDP fields: {disp.get('total_ncpdp_fields_evaluated', 0)}")
@@ -742,7 +1157,4 @@ def run_step2b(
             f.write(response)
         print(f"  💾 Full response saved to: {error_file}")
         
-        raise
-    except ValueError as e:
-        print(f"  ❌ ERROR: {e}")
-        raise
+        return None
