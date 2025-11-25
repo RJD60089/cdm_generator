@@ -70,9 +70,9 @@ class LLMClient:
         model: str | None = None,
         base_url: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096,
-        timeout: int = 120,
-        max_retries: int = 3
+        max_tokens: int = 64000,
+        timeout: int = 1800,
+        max_retries: int = 2
     ):
         """
         Initialize LLM client.
@@ -198,7 +198,10 @@ class LLMClient:
             kwargs["response_format"] = response_format
         
         logger.debug(f"LLM call #{self.total_calls}: {len(messages)} messages, {kwargs.get('max_tokens')} max_tokens")
-        print(f"  🤖 Calling LLM: {self.model}...")
+        
+        # Print start message with timestamp
+        start_timestamp = time.strftime("%H:%M:%S")
+        print(f"  🤖 [{start_timestamp}] Calling LLM: {self.model}...")
         
         try:
             resp = self.client.chat.completions.create(**kwargs)
@@ -262,11 +265,13 @@ class LLMClient:
             )
             
             # Print timing and token info to terminal
-            print(f"  ⏱️  Completed in {duration:.1f}s")
+            end_timestamp = time.strftime("%H:%M:%S")
+            print(f"  ✅ [{end_timestamp}] Completed in {duration:.1f}s")
             print(f"  📊 Tokens: {total_tokens:,} ({prompt_tokens:,} prompt + {completion_tokens:,} completion)")
         else:
             # No usage info available (some local models)
-            print(f"  ⏱️  Completed in {duration:.1f}s")
+            end_timestamp = time.strftime("%H:%M:%S")
+            print(f"  ✅ [{end_timestamp}] Completed in {duration:.1f}s")
         
         # Log usage to file
         self._log_usage(finish_reason, token_usage)

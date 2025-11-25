@@ -11,5 +11,17 @@ output/
 *.run.jsonl
 *.work.json
 
+# Archived file
+archive/
+
+# FHIR IG input
+input/strd_fhir_ig/
+
+# Interal Business Docs
+input/business/
+
+# Guardrail files
+input
+
 # Editors
 .vscode/

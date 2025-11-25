@@ -1,0 +1,58 @@
+{
+  "cdm": {
+    "domain": "Plan",
+    "type": "Core",
+    "description": "The Plan Canonical Data Model represents how pharmacy and medical benefits are structured, priced, and administered within a PBM operating in a passthrough model. It unifies plan design, benefits, networks, coverage rules, and group-level configuration. It must support both standard PBM plans and the added complexity of specialty drug management and care coordination programs.",
+    "version": "1.0"
+  },
+  "input_files": {
+    "fhir_igs": [],
+    "guardrails": [
+      "input\\cdm_plan\\GR_Navitus_DGBee_v1.0_BenefitSetupSvc_Gen1_API.xlsx",
+      "input\\cdm_plan\\GR_Navitus_DGBee_v1.0_Hierarchy_Gen1_API.xlsx",
+      "input\\cdm_plan\\GR_P&B_APIs_Data_Governance.xlsx"
+    ],
+    "glue": [
+      "input\\cdm_plan\\GLUE_plan_bpm_tables.json"
+    ],
+    "ddl": [],
+    "ncpdp_general_standards": [
+      {
+        "code": "F",
+        "name": "Formulary and Benefit (F&B) Standard",
+        "reasoning": "Primary plan-modeling standard for PBM/eRx that defines plan formulary, tiers, coverage status, utilization management rules (PA, step therapy, quantity limits), day-supply variations, and benefit cost-sharing constructs (copay/co-insurance by tier). It yields core entities/attributes for Plan, Formulary, FormularyDrug, Tier, CoverageRule, and BenefitDesign needed to represent how benefits are structured and administered."
+      },
+      {
+        "code": "R",
+        "name": "Real-Time Prescription Benefit (RTPB) Standard",
+        "reasoning": "Defines the data model for plan benefit design and pricing as exposed at the point of prescribing, including benefit stage/phase indicators, patient-pay components (copay, deductible, coinsurance), allowed amounts, pharmacy network/channel distinctions (retail, mail, specialty), and coverage restrictions (PA/QL/ST). Even though responses are member-specific, the schema encodes plan-level constructs (benefit phases, accumulator types, network attributes) essential to model pricing and coverage rules in a passthrough PBM."
+      },
+      {
+        "code": "H",
+        "name": "Health Care Identification Card \u2013 Pharmacy Standard",
+        "reasoning": "Defines canonical plan identification attributes used across PBM plan design and group configuration: RxBIN, RxPCN, RxGrp, Cardholder ID, plan/payer/processor identifiers, and contact data. These are foundational Plan and Group-level keys that unify routing/identification across networks and coverage rules in the CDM."
+      }
+    ],
+    "ncpdp_script_standards": []
+  },
+  "thresholds": {
+    "entity_threshold": 0.6,
+    "attribute_threshold": 0.4
+  },
+  "output": {
+    "directory": "output/plan",
+    "filename": "Plan_CDM.xlsx"
+  },
+  "metadata": {
+    "generated_at": "2025-11-22T00:35:57.204500",
+    "ai_analysis": {
+      "fhir_assessment": {},
+      "ncpdp_assessment": {
+        "ncpdp_relevance": "high",
+        "confidence": "medium-high",
+        "notes": "For the Plan CDM, NCPDP F&B and RTPB directly model formulary, tiering, coverage rules, benefit phases, network distinctions, and cost-sharing components\u2014core plan entities/attributes. SCRIPT itself is transactional (eRx, ePA) and not primarily plan-modeling, so it is excluded here. Compared to HL7 FHIR (e.g., InsurancePlan and the US Drug Formulary IG), NCPDP provides pharmacy-specific benefit/price constructs (tiers, UM flags, patient pay breakdowns, accumulator/phase semantics) that are critical to PBM plan modeling, while FHIR offers broader cross-domain plan abstractions that can complement but not replace NCPDP detail for pharmacy benefits."
+      }
+    },
+    "generator_version": "2.0"
+  }
+}

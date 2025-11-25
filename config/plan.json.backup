@@ -1,0 +1,222 @@
+{
+  "cdm": {
+    "domain": "Plan",
+    "type": "Core",
+    "description": "The Plan Canonical Data Model represents how pharmacy and medical benefits are structured, priced, and administered within a PBM operating in a passthrough model. It unifies plan design, benefits, networks, coverage rules, and group-level configuration. It must support both standard PBM plans and the added complexity of specialty drug management and care coordination programs.",
+    "version": "1.0"
+  },
+  "input_files": {
+    "fhir_igs": [
+      {
+        "file": "input\\strd_fhir_ig\\DaVinci\\PDex Plan Net\\StructureDefinition-plannet-InsurancePlan.json",
+        "filename": "StructureDefinition-plannet-InsurancePlan.json",
+        "resource_name": "InsurancePlan",
+        "file_type": "StructureDefinition",
+        "ig_source": "Da Vinci PDex Plan-Net",
+        "priority": 1,
+        "reasoning": "Primary plan/product entity capturing plan design, coverage components, networks, and cost sharing; aligns with payer plan constructs."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-InsurancePlan.json",
+        "filename": "StructureDefinition-InsurancePlan.json",
+        "resource_name": "InsurancePlan",
+        "file_type": "StructureDefinition",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 2,
+        "reasoning": "Alternate: base FHIR definition of plan structure, coverage, and costs if Plan-Net is not used."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-coverage-type.json",
+        "filename": "ValueSet-coverage-type.json",
+        "resource_name": "CoverageType",
+        "file_type": "ValueSet",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Enumerates plan coverage category types used by InsurancePlan.coverage.type (e.g., medical, pharmacy, dental)."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-benefit-type.json",
+        "filename": "ValueSet-benefit-type.json",
+        "resource_name": "BenefitType",
+        "file_type": "ValueSet",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Allowed benefit categories used in InsurancePlan.coverage.benefit.type to describe covered services/benefits."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-benefit-type.json",
+        "filename": "CodeSystem-benefit-type.json",
+        "resource_name": "BenefitType",
+        "file_type": "CodeSystem",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Source codes for benefit categories referenced by plan benefit definitions."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-insuranceplan-type.json",
+        "filename": "ValueSet-insuranceplan-type.json",
+        "resource_name": "InsurancePlanType",
+        "file_type": "ValueSet",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Plan type classifications (e.g., PPO, HMO, pharmacy) for InsurancePlan.type."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\DaVinci\\PDex Plan Net\\StructureDefinition-plannet-Network.json",
+        "filename": "StructureDefinition-plannet-Network.json",
+        "resource_name": "Network",
+        "file_type": "StructureDefinition",
+        "ig_source": "Da Vinci PDex Plan-Net",
+        "priority": 1,
+        "reasoning": "Network entity profile (on Organization) defining attributes of payer networks referenced from plans."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-organization-type.json",
+        "filename": "ValueSet-organization-type.json",
+        "resource_name": "OrganizationType",
+        "file_type": "ValueSet",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Includes 'ntwk' (network) and related organization types to type Network entities."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-organization-type.json",
+        "filename": "CodeSystem-organization-type.json",
+        "resource_name": "OrganizationType",
+        "file_type": "CodeSystem",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines codes for organization classifications applied to Network entities."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-PlanDefinition.json",
+        "filename": "StructureDefinition-PlanDefinition.json",
+        "resource_name": "PlanDefinition",
+        "file_type": "StructureDefinition",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Definitional artifact to encode coverage rules, utilization management criteria (e.g., PA, step therapy), and care program protocols."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-plan-definition-type.json",
+        "filename": "CodeSystem-plan-definition-type.json",
+        "resource_name": "PlanDefinitionType",
+        "file_type": "CodeSystem",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines PlanDefinition type codes used for coverage rule and program classification."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-action-participant-type.json",
+        "filename": "ValueSet-action-participant-type.json",
+        "resource_name": "ActionParticipantType",
+        "file_type": "ValueSet",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Permissible participant roles for PlanDefinition actions (e.g., patient, practitioner) relevant to care coordination programs."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-action-participant-type.json",
+        "filename": "CodeSystem-action-participant-type.json",
+        "resource_name": "ActionParticipantType",
+        "file_type": "CodeSystem",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines participant role codes referenced in PlanDefinition.action."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-ActivityDefinition.json",
+        "filename": "StructureDefinition-ActivityDefinition.json",
+        "resource_name": "ActivityDefinition",
+        "file_type": "StructureDefinition",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines reusable UM and care management activities invoked by PlanDefinition (e.g., prior auth submission steps, labs required)."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-activity-definition-category.json",
+        "filename": "ValueSet-activity-definition-category.json",
+        "resource_name": "ActivityDefinitionCategory",
+        "file_type": "ValueSet",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Categorization of activities to standardize UM and care management action types."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-activity-definition-category.json",
+        "filename": "CodeSystem-activity-definition-category.json",
+        "resource_name": "ActivityDefinitionCategory",
+        "file_type": "CodeSystem",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines codes for activity categories referenced by ActivityDefinition.category."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-Contract.json",
+        "filename": "StructureDefinition-Contract.json",
+        "resource_name": "Contract",
+        "file_type": "StructureDefinition",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Represents contractual aspects of plans, terms and documentation of plan offerings and group-level arrangements."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-contract-type.json",
+        "filename": "ValueSet-contract-type.json",
+        "resource_name": "ContractType",
+        "file_type": "ValueSet",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Permissible contract type codes to classify plan contracts (e.g., group, individual)."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-contract-type.json",
+        "filename": "CodeSystem-contract-type.json",
+        "resource_name": "ContractType",
+        "file_type": "CodeSystem",
+        "ig_source": "HL7 FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines contract type codes referenced by Contract.type."
+      }
+    ],
+    "guardrails": [
+      "input\\cdm_plan\\GR_Navitus_DGBee_v1.0_BenefitSetupSvc_Gen1_API.xlsx",
+      "input\\cdm_plan\\GR_Navitus_DGBee_v1.0_Hierarchy_Gen1_API.xlsx",
+      "input\\cdm_plan\\GR_P&B_APIs_Data_Governance.xlsx"
+    ],
+    "glue": [
+      "input\\cdm_plan\\GLUE_plan_bpm_tables.json"
+    ],
+    "ddl": [],
+    "ncpdp_general_standards": [],
+    "ncpdp_script_standards": []
+  },
+  "thresholds": {
+    "entity_threshold": 0.6,
+    "attribute_threshold": 0.4
+  },
+  "output": {
+    "directory": "output/plan",
+    "filename": "Plan_CDM.xlsx"
+  },
+  "metadata": {
+    "generated_at": "2025-11-21T19:49:21.023936",
+    "ai_analysis": {
+      "fhir_assessment": {
+        "primary_igs": [
+          "HL7 FHIR R4 Core",
+          "Da Vinci PDex Plan-Net"
+        ],
+        "expected_entity_count": 5,
+        "confidence": "medium",
+        "notes": "InsurancePlan (Plan-Net) models plan design, coverage, tiers, and cost sharing; Network (Plan-Net) captures payer networks tied to plans. PlanDefinition and ActivityDefinition capture coverage rules, UM, and care coordination program definitions essential for specialty drug management. Contract captures plan/legal terms. Member-level and transactional resources (e.g., Coverage, Eligibility) are excluded as supporting, not core to the Plan CDM."
+      },
+      "ncpdp_assessment": {
+        "ncpdp_relevance": "high",
+        "confidence": "high",
+        "notes": "NCPDP standards directly express plan routing (BIN/PCN), benefit design (tiers, UM flags), pricing outcomes (patient pay components), COB rules, and specialty enrollment signals required by a PBM Plan CDM. Compared to HL7 FHIR (e.g., InsurancePlan, Coverage, PlanDefinition), NCPDP provides transaction-ready identifiers and adjudication attributes that map precisely to PBM plan administration and pricing in a passthrough model; FHIR is complementary for broader payer/member modeling but less specific to retail/specialty pharmacy adjudication semantics."
+      }
+    },
+    "generator_version": "2.0"
+  }
+}
