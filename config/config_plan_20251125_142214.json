@@ -1,0 +1,150 @@
+9+1{
+  "cdm": {
+    "domain": "Plan",
+    "type": "Core",
+    "description": "The Plan Canonical Data Model represents how pharmacy and medical benefits are structured, priced, and administered within a PBM operating in a passthrough model. It unifies plan design, benefits, networks, coverage rules, and group-level configuration. It must support both standard PBM plans and the added complexity of specialty drug management and care coordination programs.",
+    "version": "1.0"
+  },
+  "input_files": {
+    "fhir_igs": [
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-InsurancePlan.json",
+        "filename": "StructureDefinition-InsurancePlan.json",
+        "resource_name": "InsurancePlan",
+        "file_type": "StructureDefinition",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Primary plan entity capturing product/plan, coverage components, benefits, and cost sharing. Central to PBM plan design and group-level configuration."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-coverage-type.json",
+        "filename": "ValueSet-coverage-type.json",
+        "resource_name": "CoverageType",
+        "file_type": "ValueSet",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines coverage type categories (e.g., medical vs pharmacy) used by InsurancePlan.coverage.type to structure benefits across lines of business."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-PlanDefinition.json",
+        "filename": "StructureDefinition-PlanDefinition.json",
+        "resource_name": "PlanDefinition",
+        "file_type": "StructureDefinition",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Captures plan rules, utilization management logic (e.g., PA, step therapy), and care coordination program definitions needed for specialty drug management."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-ChargeItemDefinition.json",
+        "filename": "StructureDefinition-ChargeItemDefinition.json",
+        "resource_name": "ChargeItemDefinition",
+        "file_type": "StructureDefinition",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Represents pricing and price component rules (base price, surcharges, discounts) to model plan pricing constructs in a passthrough PBM."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\StructureDefinition-Organization.json",
+        "filename": "StructureDefinition-Organization.json",
+        "resource_name": "Organization",
+        "file_type": "StructureDefinition",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Entity for payer/PBM/employer group. Supports group-level configuration (group identifiers, hierarchies) within the Plan CDM."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-organization-type.json",
+        "filename": "ValueSet-organization-type.json",
+        "resource_name": "OrganizationType",
+        "file_type": "ValueSet",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Defines organization type codes (e.g., payor, employer) to standardize payer vs employer group classification in plan configuration."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-organization-type.json",
+        "filename": "CodeSystem-organization-type.json",
+        "resource_name": "OrganizationType",
+        "file_type": "CodeSystem",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Code system backing organization type values used in plan/payer and employer group entities."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\DaVinci\\PDex Plan Net\\StructureDefinition-plannet-Network.json",
+        "filename": "StructureDefinition-plannet-Network.json",
+        "resource_name": "Network",
+        "file_type": "StructureDefinition",
+        "ig_source": "Plan-Net",
+        "priority": 1,
+        "reasoning": "Primary network entity for the Plan CDM. Encodes plan networks (pharmacy/provider) used for benefit application and pricing."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\DaVinci\\PDex Plan Net\\StructureDefinition-plannet-InsurancePlan.json",
+        "filename": "StructureDefinition-plannet-InsurancePlan.json",
+        "resource_name": "InsurancePlan",
+        "file_type": "StructureDefinition",
+        "ig_source": "Plan-Net",
+        "priority": 2,
+        "reasoning": "Alternate profile adding directory-oriented attributes (e.g., network associations). Use when network linkage within plan definition is required."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\ValueSet-coverage-class.json",
+        "filename": "ValueSet-coverage-class.json",
+        "resource_name": "CoverageClass",
+        "file_type": "ValueSet",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Standardizes group/plan/subplan/class classification codes leveraged in plan/group configuration artifacts."
+      },
+      {
+        "file": "input\\strd_fhir_ig\\FHIR CORE\\CodeSystem-coverage-class.json",
+        "filename": "CodeSystem-coverage-class.json",
+        "resource_name": "CoverageClass",
+        "file_type": "CodeSystem",
+        "ig_source": "FHIR R4 Core",
+        "priority": 1,
+        "reasoning": "Code system for coverage classification (group/plan/class). Enables consistent identifiers used across plan configuration."
+      }
+    ],
+    "guardrails": [],
+    "glue": [],
+    "ddl": [],
+    "ncpdp_general_standards": [
+      {
+        "code": "F",
+        "name": "Formulary & Benefit Standard",
+        "reasoning": "Directly models plan design and coverage constructs needed for a PBM Plan CDM. Provides canonical data elements for formulary status, tiering, coverage determinations (e.g., prior authorization, step therapy, quantity limits), product-to-tier mappings, cost-share presentation (copay/coinsurance indicators), plan/benefit identifiers, and channel/pharmacy-type distinctions (retail/mail/specialty) used to express network- and channel-specific benefits. These are core entities and attributes for structuring, pricing, and administering pharmacy benefits, including specialty management rules."
+      }
+    ],
+    "ncpdp_script_standards": []
+  },
+  "thresholds": {
+    "entity_threshold": 0.6,
+    "attribute_threshold": 0.4
+  },
+  "output": {
+    "directory": "output/plan",
+    "filename": "Plan_CDM.xlsx"
+  },
+  "metadata": {
+    "generated_at": "2025-11-25T14:22:14.284990",
+    "ai_analysis": {
+      "fhir_assessment": {
+        "primary_igs": [
+          "FHIR R4 Core",
+          "Plan-Net"
+        ],
+        "expected_entity_count": 5,
+        "confidence": "medium",
+        "notes": "Core InsurancePlan, PlanDefinition, ChargeItemDefinition, Organization, and Plan-Net Network cover plan structure, benefits, pricing, networks, and rules. Coverage-class and organization-type terminologies support group/plan classification without introducing member-level Coverage."
+      },
+      "ncpdp_assessment": {
+        "ncpdp_relevance": "medium",
+        "confidence": "high",
+        "notes": "NCPDP F provides the most authoritative content model for formulary, tiering, and coverage rules that define a PBM plan\u2019s pharmacy benefit. Other plan constructs (e.g., detailed network contracting, group hierarchies, custom accumulator logic) are not comprehensively modeled by NCPDP and often require PBM-specific schemas or complementary frameworks (e.g., HL7 FHIR InsurancePlan/Coverage/Network). SCRIPT standards are transactional for ePrescribing and do not primarily model plan structure; thus none were selected."
+      }
+    },
+    "generator_version": "2.0"
+  }
+}

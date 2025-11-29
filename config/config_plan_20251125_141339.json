@@ -1,0 +1,42 @@
+{
+  "cdm": {
+    "domain": "Plan",
+    "type": "Core",
+    "description": "The Plan Canonical Data Model represents how pharmacy and medical benefits are structured, priced, and administered within a PBM operating in a passthrough model. It unifies plan design, benefits, networks, coverage rules, and group-level configuration. It must support both standard PBM plans and the added complexity of specialty drug management and care coordination programs.",
+    "version": "1.0"
+  },
+  "input_files": {
+    "fhir_igs": [],
+    "guardrails": [],
+    "glue": [],
+    "ddl": [],
+    "ncpdp_general_standards": [
+      {
+        "code": "F",
+        "name": "Formulary & Benefit Standard",
+        "reasoning": "Directly models plan design and coverage constructs needed for a PBM Plan CDM. Provides canonical data elements for formulary status, tiering, coverage determinations (e.g., prior authorization, step therapy, quantity limits), product-to-tier mappings, cost-share presentation (copay/coinsurance indicators), plan/benefit identifiers, and channel/pharmacy-type distinctions (retail/mail/specialty) used to express network- and channel-specific benefits. These are core entities and attributes for structuring, pricing, and administering pharmacy benefits, including specialty management rules."
+      }
+    ],
+    "ncpdp_script_standards": []
+  },
+  "thresholds": {
+    "entity_threshold": 0.6,
+    "attribute_threshold": 0.4
+  },
+  "output": {
+    "directory": "output/plan",
+    "filename": "Plan_CDM.xlsx"
+  },
+  "metadata": {
+    "generated_at": "2025-11-25T14:13:39.823839",
+    "ai_analysis": {
+      "fhir_assessment": {},
+      "ncpdp_assessment": {
+        "ncpdp_relevance": "medium",
+        "confidence": "high",
+        "notes": "NCPDP F provides the most authoritative content model for formulary, tiering, and coverage rules that define a PBM plan\u2019s pharmacy benefit. Other plan constructs (e.g., detailed network contracting, group hierarchies, custom accumulator logic) are not comprehensively modeled by NCPDP and often require PBM-specific schemas or complementary frameworks (e.g., HL7 FHIR InsurancePlan/Coverage/Network). SCRIPT standards are transactional for ePrescribing and do not primarily model plan structure; thus none were selected."
+      }
+    },
+    "generator_version": "2.0"
+  }
+}

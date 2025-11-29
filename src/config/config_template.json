@@ -1,0 +1,33 @@
+{
+  "cdm": {
+    "domain": "",
+    "type": "Core",
+    "description": "",
+    "version": "1.0",
+    "core_dependency": ""
+  },
+  "input_files": {
+    "fhir_igs": [],
+    "guardrails": [],
+    "glue": [],
+    "ddl": [],
+    "ncpdp_general_standards": [],
+    "ncpdp_script_standards": []
+  },
+  "thresholds": {
+    "entity_threshold": 0.6,
+    "attribute_threshold": 0.4
+  },
+  "output": {
+    "directory": "output/",
+    "filename": "_CDM.xlsx"
+  },
+  "metadata": {
+    "generated_at": "",
+    "ai_analysis": {
+      "fhir_assessment": {},
+      "ncpdp_assessment": {}
+    },
+    "generator_version": "2.0"
+  }
+}

@@ -29,42 +29,55 @@ from src.steps.step1c_glue import run_step1c
 
 load_dotenv()
 
+def find_latest_config(base_name: str) -> Path:
+    """Find latest timestamped config file from base name"""
+    config_dir = Path("config")
+    
+    # Extract base name without extension
+    base = Path(base_name).stem  # e.g., "config_plan"
+    
+    # Find all matching timestamped configs
+    pattern = f"{base}_*.json"
+    matches = sorted(config_dir.glob(pattern), reverse=True)
+    
+    if matches:
+        return matches[0]
+    
+    # Fallback to exact match
+    exact = config_dir / base_name
+    if exact.exists():
+        return exact
+    
+    raise FileNotFoundError(f"No config file found matching: {base_name}")
+
 def main():
     ap = argparse.ArgumentParser(
         description="CDM Generation Orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Interactive mode (prompts for everything)
-  python cdm_orchestrator.py --config config/plan_and_benefit.json
-  
-  # Non-interactive (for automation)
-  python cdm_orchestrator.py --config config.json --steps 1,2 --dry-run --model gpt-5
+Example:
+  python cdm_orchestrator.py config_plan.json
         """
     )
     
-    ap.add_argument("--config", required=True, help="Path to JSON config file")
-    ap.add_argument("--steps", help="Steps to run (e.g., '1' or '1,2') - prompts if not provided")
-    ap.add_argument("--dry-run", action="store_true", help="Dry run mode - prompts if not provided")
-    ap.add_argument("--model", help="Model to use (gpt-5, gpt-4.1, local-70b, etc.) - prompts if not provided")
+    ap.add_argument("config", help="Config file base name (e.g., config_plan.json)")
     
     args = ap.parse_args()
     
     try:
+        # Find latest timestamped config
+        config_file = find_latest_config(args.config)
+        print(f"Using configuration: {config_file}")
+        
         # Load configuration
-        print(f"Loading configuration from: {args.config}")
-        config = load_config(args.config)
+        config = load_config(str(config_file))
         print(f"✓ Configuration loaded")
         print(f"  Domain: {config.cdm.domain}")
         print(f"  Description: {config.cdm.description}")
         
         # === 1. DRY RUN OR LIVE? ===
         print(f"\n{'='*60}")
-        if args.dry_run:
-            dry_run = True
-            print("Mode: DRY RUN (from command line)")
-        else:
-            dry_run = prompt_user("Run in DRY RUN mode (review prompts only)?", default="N")
+        dry_run = prompt_user("Run in DRY RUN mode (review prompts only)?", default="N")
         
         mode_str = "DRY RUN" if dry_run else "LIVE"
         print(f"✓ Mode: {mode_str}")
@@ -74,17 +87,8 @@ Examples:
         llm = None
         if not dry_run:
             print(f"\n{'='*60}")
-            if args.model:
-                selected_model = args.model
-                if selected_model not in MODEL_OPTIONS:
-                    print(f"ERROR: Unknown model '{selected_model}'")
-                    print(f"Available: {list(MODEL_OPTIONS.keys())}")
-                    sys.exit(1)
-                model_config = MODEL_OPTIONS[selected_model]
-                print(f"Model: {model_config['name']} (from command line)")
-            else:
-                selected_model = select_model()
-                model_config = MODEL_OPTIONS[selected_model]
+            selected_model = select_model()
+            model_config = MODEL_OPTIONS[selected_model]
             
             print(f"✓ Selected model: {model_config['name']}")
             
@@ -99,31 +103,27 @@ Examples:
         
         # === 3. STEP SELECTION ===
         print(f"\n{'='*60}")
-        if args.steps:
-            steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
-            print(f"Steps to run: {sorted(steps_to_run)} (from command line)")
+        print("Available steps:")
+        print("  1 - Input Rationalization (FHIR, Guardrails, Glue)")
+        print("  2 - CDM Generation (FHIR Foundation + Refinements)")
+        print("  3 - Relationships & Model Construction (not yet implemented)")
+        print("  4 - DDL Generation (not yet implemented)")
+        print("  5 - Excel Generation (not yet implemented)")
+        
+        steps_input = input("\nEnter steps to run (comma-separated, e.g., '1,2' or 'all') [1]: ").strip()
+        
+        if steps_input.lower() == 'all':
+            steps_to_run = {1, 2}  # Only implemented steps
+        elif not steps_input:
+            steps_to_run = {1}  # Default
         else:
-            print("Available steps:")
-            print("  1 - Input Rationalization (FHIR, Guardrails, Glue)")
-            print("  2 - CDM Generation (FHIR Foundation + Refinements)")
-            print("  3 - Relationships & Model Construction (not yet implemented)")
-            print("  4 - DDL Generation (not yet implemented)")
-            print("  5 - Excel Generation (not yet implemented)")
-            
-            steps_input = input("\nEnter steps to run (comma-separated, e.g., '1,2' or 'all') [1]: ").strip()
-            
-            if steps_input.lower() == 'all':
-                steps_to_run = {1, 2}  # Only implemented steps
-            elif not steps_input:
-                steps_to_run = {1}  # Default
-            else:
-                try:
-                    steps_to_run = set(int(s.strip()) for s in steps_input.split(','))
-                except ValueError:
-                    print("Invalid input. Using default: Step 1")
-                    steps_to_run = {1}
-            
-            print(f"✓ Selected steps: {sorted(steps_to_run)}")
+            try:
+                steps_to_run = set(int(s.strip()) for s in steps_input.split(','))
+            except ValueError:
+                print("Invalid input. Using default: Step 1")
+                steps_to_run = {1}
+        
+        print(f"✓ Selected steps: {sorted(steps_to_run)}")
         print(f"{'='*60}")
         
         # Create base output directory
@@ -143,11 +143,11 @@ Examples:
             print(f"STEP 1: INPUT RATIONALIZATION")
             print(f"{'='*60}")
             
-            prep_outdir = base_outdir / "prep"
-            prep_outdir.mkdir(parents=True, exist_ok=True)
+            rationalized_outdir = base_outdir / "rationalized"
+            rationalized_outdir.mkdir(parents=True, exist_ok=True)
             
             if dry_run:
-                prompts_dir = prep_outdir / "prompts"
+                prompts_dir = rationalized_outdir / "prompts"
                 prompts_dir.mkdir(parents=True, exist_ok=True)
                 print(f"\n🔍 DRY RUN MODE - Prompts will be saved to: {prompts_dir}")
             
@@ -173,7 +173,7 @@ Examples:
                 print(f"\n=== Step 1a: FHIR Rationalization ===")
                 run_step1a(
                     config=config,
-                    outdir=prep_outdir,
+                    outdir=rationalized_outdir,
                     llm=llm if not dry_run else None,
                     dry_run=dry_run
                 )
@@ -183,7 +183,7 @@ Examples:
                 print(f"\n=== Step 1b: Guardrails Rationalization ===")
                 run_step1b(
                     config=config,
-                    outdir=prep_outdir,
+                    outdir=rationalized_outdir,
                     llm=llm if not dry_run else None,
                     dry_run=dry_run
                 )
@@ -193,30 +193,29 @@ Examples:
                 print(f"\n=== Step 1c: Glue Schema Rationalization ===")
                 run_step1c(
                     config=config,
-                    outdir=prep_outdir,
+                    outdir=rationalized_outdir,
                     llm=llm if not dry_run else None,
                     dry_run=dry_run
                 )
             
             # Step 1d: NCPDP Rationalization
-            process_ncpdp = False
-            if config.inputs.ncpdp and config.inputs.ncpdp_filter:
-                print(f"\nFound NCPDP standards with filter configuration")
-                process_ncpdp = prompt_user("Rationalize NCPDP to domain-relevant fields?", default="Y")
+            ncpdp_general = Path("input/strd_ncpdp/ncpdp_general_standards.json")
+            ncpdp_script = Path("input/strd_ncpdp/ncpdp_script_standards.json")
             
-            if process_ncpdp:
-                print(f"\n=== Step 1d: NCPDP Rationalization ===")
-                from src.steps.step1d_ncpdp import run_step1d
+            if ncpdp_general.exists() or ncpdp_script.exists():
+                print(f"\nFound NCPDP standards files")
+                process_ncpdp = prompt_user("Process NCPDP standards?", default="Y")
                 
-                run_step1d(
-                    config=config,
-                    outdir=prep_outdir,
-                    dry_run=dry_run
-                )
+                if process_ncpdp:
+                    print(f"\n=== Step 1d: NCPDP Rationalization ===")
+                    from src.rationalizers.rationalize_ncpdp import NCPDPRationalizer
+                    
+                    rationalizer = NCPDPRationalizer(str(config_file))
+                    rationalizer.run(str(ncpdp_general), str(ncpdp_script), str(rationalized_outdir))
             
             print(f"\n{'='*60}")
             print(f"✓ STEP 1 COMPLETE")
-            print(f"  Rationalized files saved to: {prep_outdir}")
+            print(f"  Rationalized files saved to: {rationalized_outdir}")
             print(f"{'='*60}")
         
         # === STEP 2: CDM GENERATION ===
@@ -252,12 +251,12 @@ Examples:
             else:
                 # Find rationalized FHIR from Step 1 (needed for 2a)
                 if run_2a:
-                    prep_outdir = base_outdir / "prep"
-                    if not prep_outdir.exists():
+                    rationalized_outdir = base_outdir / "rationalized"
+                    if not rationalized_outdir.exists():
                         print("  ❌ ERROR: Step 1 output not found. Run Step 1a first.")
                         sys.exit(1)
                     
-                    fhir_files = sorted(prep_outdir.glob("rationalized_fhir_*.json"))
+                    fhir_files = sorted(rationalized_outdir.glob("rationalized_fhir_*.json"))
                     if not fhir_files:
                         print("  ❌ ERROR: No rationalized FHIR file found. Run Step 1a first.")
                         sys.exit(1)

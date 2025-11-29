@@ -16,7 +16,7 @@ Features:
 - timeout=1800, encoding='utf-8', list/dict NCPDP handling
 
 Usage:
-    python config/config_generator.py config/config_plan.json
+    python src/config/config_generator.py input/business/cdm_plan/config/config_plan.json
 """
 
 import json
@@ -26,8 +26,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to path for imports (src/config -> src -> project_root)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.core.llm_client import LLMClient
 
@@ -37,8 +37,9 @@ class ConfigGenerator:
     
     def __init__(self):
         self.llm_client = LLMClient(timeout=1800)
-        self.config_dir = Path(__file__).parent
-        self.project_root = self.config_dir.parent
+        self.config_dir = Path(__file__).parent  # src/config
+        self.src_dir = self.config_dir.parent     # src
+        self.project_root = self.src_dir.parent   # project root
         self.input_dir = self.project_root / "input"
         self.standards_fhir_ig = self.input_dir / "strd_fhir_ig"
         self.standards_ncpdp = self.input_dir / "strd_ncpdp"
@@ -78,13 +79,14 @@ class ConfigGenerator:
     
     def load_existing_config(self, partial_config_file: str) -> Optional[Dict]:
         """Load most recent timestamped config if it exists."""
-        # Get base name from partial config file (e.g., config_plan.json -> config_plan)
+        # Get base name and directory from partial config file
         base_path = Path(partial_config_file)
         base_name = base_path.stem  # e.g., "config_plan"
+        config_dir = base_path.parent  # Search in same directory as input config
         
         # Find all timestamped configs matching pattern: config_plan_YYYYMMDD_HHMMSS.json
         pattern = f"{base_name}_*.json"
-        timestamped_configs = sorted(self.config_dir.glob(pattern), reverse=True)
+        timestamped_configs = sorted(config_dir.glob(pattern), reverse=True)
         
         if timestamped_configs:
             try:
@@ -151,7 +153,11 @@ class ConfigGenerator:
     def determine_ncpdp_standards(self, partial_config: Dict) -> Dict:
         """Use AI to determine required NCPDP standards."""
         
-        prompt = self._build_ncpdp_determination_prompt(partial_config)
+        # Load actual standards from NCPDP files
+        general_standards = self._load_ncpdp_standards_list("ncpdp_general_standards.json")
+        script_standards = self._load_ncpdp_standards_list("ncpdp_script_standards.json")
+        
+        prompt = self._build_ncpdp_determination_prompt(partial_config, general_standards, script_standards)
         
         print("\n🤖 Analyzing NCPDP requirements with AI...\n")
         
@@ -174,6 +180,93 @@ class ConfigGenerator:
             print(f"Error during NCPDP AI analysis: {e}")
             raise
     
+    def _load_ncpdp_standards_list(self, filename: str) -> Dict[str, str]:
+        """Load _standards mapping from NCPDP file."""
+        ncpdp_file = self.standards_ncpdp / filename
+        if ncpdp_file.exists():
+            with open(ncpdp_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('_standards', {})
+        return {}
+    
+    def _build_ncpdp_determination_prompt(self, partial_config: Dict, general_standards: Dict[str, str], script_standards: Dict[str, str]) -> str:
+        """Build prompt for AI to determine NCPDP standards."""
+        
+        cdm = partial_config['cdm']
+        
+        # Format standards lists for the prompt
+        general_list = "\n".join([f'   - "{code}": "{name}"' for code, name in general_standards.items()])
+        script_list = "\n".join([f'   - "{code}": "{name}"' for code, name in script_standards.items()]) if script_standards else "   (No SCRIPT standards available)"
+        
+        return f"""You are an NCPDP standards expert analyzing CDM requirements for Pharmacy Benefit Management.
+
+# Task
+Determine which NCPDP standards are relevant for creating a CDM in the specified domain.
+
+# CDM Metadata
+- **Domain**: {cdm['domain']}
+- **Type**: {cdm['type']}
+- **Description**: {cdm['description']}
+
+# VALID NCPDP STANDARDS - SELECT ONLY FROM THESE LISTS
+
+## General Standards (ncpdp_general_standards):
+{general_list}
+
+## SCRIPT Standards (ncpdp_script_standards):
+{script_list}
+
+# CRITICAL Instructions
+
+1. **ONLY SELECT FROM THE ABOVE LISTS**
+   a. You MUST ONLY use standard codes from the lists above
+   b. DO NOT invent, create, or reference any standards not in these lists
+   c. If a standard you think should exist is not listed, it is NOT available - do not include it
+
+2. **CDM Domain Alignment**
+   a. Select standards that directly support entities and attributes for this CDM
+   b. Consider the PBM passthrough model context
+   c. Focus on standards that define data structures, not just transaction flows
+
+3. **Selection Criteria**
+   a. HIGH VALUE: Standards that define core entities/attributes for this domain
+   b. MEDIUM VALUE: Standards with supporting reference data
+   c. LOW VALUE: Standards primarily for transactions/messaging (exclude unless core to domain)
+
+# Output Format
+
+Respond with ONLY valid JSON:
+
+{{
+  "ncpdp_general_standards": [
+    {{
+      "code": "X",
+      "name": "Standard Name from list above",
+      "reasoning": "Why this standard supports the CDM domain"
+    }}
+  ],
+  "ncpdp_script_standards": [
+    {{
+      "code": "SX",
+      "name": "SCRIPT Standard Name from list above", 
+      "reasoning": "Why this standard supports the CDM domain"
+    }}
+  ],
+  "domain_assessment": {{
+    "ncpdp_relevance": "high | medium | low",
+    "confidence": "high | medium | low",
+    "notes": "Brief assessment of NCPDP fit for this domain"
+  }}
+}}
+
+# Critical Requirements
+- Return ONLY valid JSON, no markdown or code blocks
+- Use ONLY codes from the provided lists above
+- Empty arrays are acceptable if no standards apply
+- Provide clear reasoning for each selection
+
+Respond with JSON only:"""
+
     def _parse_ncpdp_response(self, ai_response: Dict) -> Dict:
         """Parse AI NCPDP response and auto-split by code prefix if needed."""
         
@@ -208,7 +301,7 @@ class ConfigGenerator:
         
         cdm = partial_config['cdm']
         
-        return f"""You are a FHIR R4 and US healthcare IG expert analyzing CDM requirements.
+        return f"""You are a FHIR IG expert analyzing the appropriate FHIR IGs to support building out a CDM for the select domain.
 
 # Task
 Based on your knowledge of FHIR as well as industry understanding of Pharmacy Benefit Management, Specialty Drug, and Care Management, select the FHIR resource that will support the creation of Entity and Attributes for the CDM. Your task includes determining the EXACT FHIR resource files that are of highest value to build this CDM. You will be returning specific resource filenames.
@@ -226,16 +319,16 @@ Based on your knowledge of FHIR as well as industry understanding of Pharmacy Be
    b. The CDM description is: {cdm['description']}
 
 2. **Resources INCLUDED in the CDM Only**
-   a. The selected FHIR resource files are used in a downstream step to define the CDM entities and attributes. Another step defines the relationships between the CDMs
-   b. Return ONLY resources that represent entities and attributes IN this CDM
-   c. Do NOT include resources that are only supporting/referenced by this CDM
-   d. For each FHIR resource selected, include an explanation as to why it was selected for this CDM
+   a. The selected FHIR resource files are used in a downstream step to define the CDM entities and attributes. Another step defines the relationships between the CDMs.
+   b. Return ONLY resources that represent entities and attributes IN this CDM.
+   c. Do NOT include additional **StructureDefinition** resources whose primary entity is modeled in a different CDM (for example, Person, Patient, Practitioner, Claim), even if they are referenced. However, you SHOULD include ValueSets and CodeSystems that are needed for the selected StructureDefinitions in this CDM.
+   d. For each FHIR resource selected, include an explanation as to why it was selected for this CDM.
 
 3. **IG Priority for Resource Selection**
-   a. When multiple IGs define the same resource, you need to choose the appropriate IG(s) based on CDM domain context to select the resource
-   b. When a resource exists in more than one IG, choose the 1 or 2 BEST FIT duplicate FHIR resources that your knowledge of FHIR, PBM, Specialty Drug, and Care Management will support the CDM
-      i. Only include alternates if they add clear domain-specific value
-      ii. If duplicates exist, assign priority (1=use first, 2=alternate)
+   a. When multiple IGs define the same resource, you need to choose the appropriate IG(s) based on CDM domain context to select the resource.
+   b. When a resource exists in more than one IG, choose the 1 or 2 BEST FIT duplicate FHIR resources that your knowledge of FHIR, PBM, Specialty Drug, and Care Management will support the CDM:
+      i. Only include alternates if they add clear domain-specific value.
+      ii. If duplicates exist, assign priority (1=use first, 2=alternate).
 
 4. **FHIR resource file types to Include**
    a. For each resource, identify ALL relevant file types that your knowledge of FHIR, PBM, Specialty Drug, and Care Management will be of high value to support the CDM:
@@ -244,14 +337,16 @@ Based on your knowledge of FHIR as well as industry understanding of Pharmacy Be
       iii. **ValueSet-*.json** - Allowed value constraints
       iv. **CapabilityStatement-*.json** - IG context (optional)
 
-5. **Exact Filenames**
-   a. You have complete FHIR R4 and IG knowledge
-   b. Return EXACT filenames as they appear in standard IGs
-   c. Examples:
-      i. `StructureDefinition-us-core-coverage.json`
-      ii. `ValueSet-coverage-class.json`
-      iii. `StructureDefinition-hrex-organization.json`
-   d. Use standard IG file naming conventions
+5. **CRITICAL: Include Directly Supporting Terminology for Selected StructureDefinitions**
+   a. When you select a StructureDefinition, identify the coded elements that are most important for this CDM's domain (for example: **type**, category, status, level, class, funding model, line of business, etc.). For those elements, you MUST include the ValueSets and CodeSystems that define their allowed values.
+   b. Treat any element literally named "type" on the selected StructureDefinition (e.g., InsurancePlan.type, Organization.type, Contract.type) as a high-value classification field. If the IG defines a ValueSet or CodeSystem for that "type" element, you MUST include those terminology files in the output, as long as they exist in the relevant FHIR/IG packages.
+   c. The StructureDefinition defines the entity structure; the ValueSets/CodeSystems define the valid values for coded elements. Without the needed supporting terminology, the downstream rationalization will have incomplete type mappings.
+   d. BALANCE IN SELECTING supporting files is CRITICAL. Include supporting terminology ONLY when it directly describes the core identity, classification, or administrative characteristics of the entity in this CDM. Avoid terminology that is primarily about detailed clinical content, detailed benefit logic, or processing rules that belong in other domains.   
+
+6. **Exact Filenames**
+   a. You have complete FHIR R4 and IG knowledge.
+   b. Return EXACT filenames as they appear in standard IGs.
+   c. Use standard IG file naming conventions.
 
 # Output Format
 
@@ -260,32 +355,32 @@ Respond with ONLY valid JSON:
 {{
   "fhir_igs": [
     {{
-      "filename": "StructureDefinition-us-core-coverage.json",
-      "resource_name": "Coverage",
+      "filename": "StructureDefinition-[name].json",
+      "resource_name": "[name]",
       "file_type": "StructureDefinition",
-      "ig_source": "US Core",
+      "ig_source": "[IG]",
       "priority": 1,
-      "reasoning": "Primary coverage resource for member-level insurance. US Core is baseline standard."
+      "reasoning": "Primary [name] resource for [domain]. [IG] is baseline standard."
     }},
     {{
-      "filename": "ValueSet-coverage-class.json",
-      "resource_name": "CoverageClass",
+      "filename": "ValueSet-[name]-class.json",
+      "resource_name": "[name]Class",
       "file_type": "ValueSet",
-      "ig_source": "US Core",
+      "ig_source": "[IG]",
       "priority": 1,
-      "reasoning": "Defines coverage classification codes (group/plan)."
+      "reasoning": "Defines [name] classification codes."
     }},
     {{
-      "filename": "StructureDefinition-pdex-coverage.json",
-      "resource_name": "Coverage",
+      "filename": "StructureDefinition-[profile]-[name].json",
+      "resource_name": "[name]",
       "file_type": "StructureDefinition",
-      "ig_source": "PDex",
+      "ig_source": "[IG]",
       "priority": 2,
-      "reasoning": "Alternate: PDex extends US Core Coverage with payer-specific fields."
+      "reasoning": "Alternate: [IG] extends base [name] with domain-specific fields."
     }}
   ],
   "domain_assessment": {{
-    "primary_igs": ["US Core", "Plan-Net"],
+    "primary_igs": ["[IG 1]", "[IG 2]"],
     "expected_entity_count": 5,
     "confidence": "high | medium | low",
     "notes": "Brief assessment of IG fit for this domain."
@@ -293,94 +388,12 @@ Respond with ONLY valid JSON:
 }}
 
 # Critical Requirements
-- Return ONLY valid JSON, no markdown or code blocks
-- Use exact FHIR R4/IG standard filenames
-- Assign priority (1=primary, 2=alternate) for duplicate resources
-- Focus on resources for CDM entities and attributes, not supporting references
-- Include all file types (StructureDefinition, CodeSystem, ValueSet) per resource
-- Provide clear, specific reasoning for each file
-
-Respond with JSON only:"""
-    
-    def _build_ncpdp_determination_prompt(self, partial_config: Dict) -> str:
-        """Build prompt for AI to determine NCPDP standards."""
-        
-        cdm = partial_config['cdm']
-        
-        return f"""You are an NCPDP standards expert analyzing CDM requirements for Pharmacy Benefit Management.
-
-# Task
-Based on your knowledge of NCPDP standards as well as industry understanding of Pharmacy Benefit Management, Specialty Drug, and Care Management, select the NCPDP standard codes that will support the creation of Entity and Attributes for the CDM. Your task includes determining which NCPDP transaction and SCRIPT standards are of highest value to build this CDM. You will be returning specific standard codes with clear reasoning.
-
-# CDM Metadata
-- **Domain**: {cdm['domain']}
-- **Type**: {cdm['type']}
-{f"- **Core Dependency**: {cdm.get('core_dependency', 'N/A')}" if cdm['type'].lower() == 'functional' else ""}
-- **Description**: {cdm['description']}
-
-# CRITICAL Instructions
-
-1. **CDM Context for NCPDP Standard Selection**
-   a. The CDM domain is: {cdm['domain']}
-   b. The CDM description is: {cdm['description']}
-
-2. **CRITICAL: MAXIMUM SELECTIVITY - ENTITY AFFINITY ONLY**
-   a. Select ONLY standards where the standard's PRIMARY PURPOSE is to DEFINE the structure, attributes, and rules of this CDM domain
-   b. EXCLUDE standards that merely reference, route to, process, or transact using this CDM
-   c. EXCLUDE standards whose purpose is integration, coordination, reporting, or billing
-   d. Ask: "Does this standard exist to MODEL this domain?"
-      - YES → Consider including
-      - NO (exists to USE/PROCESS this domain) → Exclude
-   e. Selectivity test:
-      - If removing this standard means the CDM cannot be defined → INCLUDE
-      - If removing this standard only affects transactions/processing → EXCLUDE
-   f. Err on selecting TOO FEW rather than too many
-
-3. **Use your knowledge of NCPDP Standards as well as industry knowledge of PBMs, Specialty Drug, and Care Management organizations to identify the NCPDP Standards that will be of high value generating the CDM entities and attributes**
-   a. The selected NCPDP standards are used in a downstream step to define the CDM entities and attributes. Another step defines the relationships between the CDMs
-   b. Return ONLY standards that represent entities and attributes IN this CDM
-   c. Do NOT include standards that are only supporting/referenced by this CDM
-   d. For each NCPDP standard selected, include an explanation as to why it was selected for this CDM
-
-4. **To identify the selected standards return the Standard Code (A,B,C) for the selected standards**
-
-# Output Format
-
-Respond with ONLY valid JSON:
-
-{{
-  "ncpdp_general_standards": [
-    {{
-      "code": "I",
-      "name": "Insurance Segment",
-      "reasoning": "Contains plan routing identifiers (BIN/PCN/Group) and coverage structure fields essential for plan identification in pharmacy transactions."
-    }},
-    {{
-      "code": "T",
-      "name": "Transmission Header Standard",
-      "reasoning": "Includes plan sponsor identification and routing information required for transaction processing and network configuration."
-    }}
-  ],
-  "ncpdp_script_standards": [
-    {{
-      "code": "S",
-      "name": "SCRIPT Messaging Standard",
-      "reasoning": "Defines electronic prescription routing and plan-level formulary messaging workflows."
-    }}
-  ],
-  "domain_assessment": {{
-    "ncpdp_relevance": "high | medium | low",
-    "confidence": "high | medium | low",
-    "notes": "Brief assessment of NCPDP standards fit for this CDM domain. Include comparison to FHIR if relevant (e.g., 'NCPDP provides transaction-level identifiers while FHIR models plan structure')."
-  }}
-}}
-
-# Critical Requirements
-- Return ONLY valid JSON, no markdown or code blocks
-- Use single-letter standard codes (T, F, H, I, C, D, P, etc.)
-- Focus on standards for CDM entities and attributes, not supporting references
-- Provide clear, specific reasoning for each standard
-- Be selective - only include standards of highest value to the CDM
+- Return ONLY valid JSON, no markdown or code blocks.
+- Use exact FHIR R4/IG standard filenames.
+- Assign priority (1=primary, 2=alternate) for duplicate resources.
+- Focus on resources for CDM entities and attributes, not additional entities whose CDMs are out of scope.
+- **ALWAYS include ValueSets and CodeSystems that support high-value coded elements (type, category, status, class, level, etc.) in the selected StructureDefinitions for this CDM.**
+- Provide clear, specific reasoning for each file.
 
 Respond with JSON only:"""
     
@@ -581,14 +594,15 @@ Respond with JSON only:"""
     
     def save_config(self, config: Dict, partial_config_file: str) -> Path:
         """Save configuration to timestamped file."""
-        # Get base name from partial config file
+        # Get base name and directory from partial config file
         base_path = Path(partial_config_file)
         base_name = base_path.stem  # e.g., "config_plan"
+        output_dir = base_path.parent  # Save to same directory as input config
         
         # Create timestamped filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{base_name}_{timestamp}.json"
-        filepath = self.config_dir / filename
+        filepath = output_dir / filename
         
         with open(filepath, 'w') as f:
             json.dump(config, f, indent=2)
@@ -751,9 +765,9 @@ Respond with JSON only:"""
 def main():
     """Entry point for config generator."""
     if len(sys.argv) < 2:
-        print("Usage: python config/config_generator.py <partial_config_file>")
+        print("Usage: python src/config/config_generator.py <partial_config_file>")
         print("\nExample:")
-        print("  python config/config_generator.py config/config_plan.json")
+        print("  python src/config/config_generator.py input/business/cdm_plan/config/config_plan.json")
         sys.exit(1)
     
     partial_config_file = sys.argv[1]
