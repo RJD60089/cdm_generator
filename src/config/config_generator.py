@@ -198,10 +198,10 @@ class ConfigGenerator:
         general_list = "\n".join([f'   - "{code}": "{name}"' for code, name in general_standards.items()])
         script_list = "\n".join([f'   - "{code}": "{name}"' for code, name in script_standards.items()]) if script_standards else "   (No SCRIPT standards available)"
         
-        return f"""You are an NCPDP standards expert analyzing CDM requirements for Pharmacy Benefit Management.
+        return f"""You are an NCPDP standards expert analyzing and selecting the appropriate NCPDP Standard Format Key to support building out a Canonical Data Model (CDM) for the specific domain.
 
 # Task
-Determine which NCPDP standards are relevant for creating a CDM in the specified domain.
+Based on your knowledge of NCPDP Standards as well as industry understanding of Pharmacy Benefit Management, Specialty Drug, and Care Management, select the Standard Formats (A-Z) that contain the NCPDP data elements that will be of HIGHEST VALUE for the creation of Entities and Attributes in the specified CDM.
 
 # CDM Metadata
 - **Domain**: {cdm['domain']}
@@ -216,22 +216,31 @@ Determine which NCPDP standards are relevant for creating a CDM in the specified
 ## SCRIPT Standards (ncpdp_script_standards):
 {script_list}
 
-# CRITICAL Instructions
+# CRITICAL Selection Rules
 
-1. **ONLY SELECT FROM THE ABOVE LISTS**
-   a. You MUST ONLY use standard codes from the lists above
-   b. DO NOT invent, create, or reference any standards not in these lists
-   c. If a standard you think should exist is not listed, it is NOT available - do not include it
+1. **SELECT ONLY THOSE STANDARD FORMATS THAT ARE OF HIGHEST VALUE**
+   a. This may be no resources to several resources
+   b. Empty arrays are valid and can be correct for certain domains
+   c. Only include standards that clearly pass ALL criteria below
 
-2. **CDM Domain Alignment**
-   a. Select standards that directly support entities and attributes for this CDM
-   b. Consider the PBM passthrough model context
-   c. Focus on standards that define data structures, not just transaction flows
+2. **STANDARD FORMAT SELECTION TEST**
+   a. Ask: "Does this Standard Format's data elements provide high value in defining the specified CDM?"
+   b. SELECT only if the Standard Format's data elements primary purpose is to DEFINE data structures for this CDM domain
+   c. REJECT if the Standard Format's data elements merely USES or REFERENCES fields from this domain in transactions
+   d. BALANCE IN SELECTING the Standard Formats is CRITICAL. Include the Standard Format ONLY when it directly describes the core entities in this CDM. AVOID Standard Formats where the data elements in that Standard Format primarily represent details, logic, or processing rules that belong in OTHER DOMAINS.
+   e. Balancing also includes determining when there are VERY FEW Standard Format's data elements that DIRECTLY support the creation of this CDM. ALWAYS CONSIDER THE FOLLOWING: Are the few identified data elements of enough value to the CDM in representing the domain to add all the Standard Format's data elements?  The answer may be YES, or the answer may be NO. Only if the answer is YES, add those Standard Formats with VERY FEW HIGH VALUE data elements.
 
-3. **Selection Criteria**
-   a. HIGH VALUE: Standards that define core entities/attributes for this domain
-   b. MEDIUM VALUE: Standards with supporting reference data
-   c. LOW VALUE: Standards primarily for transactions/messaging (exclude unless core to domain)
+3. **ENTITY-DEFINING vs FIELD-USING**
+   a. SELECT: Standards that DEFINE entities, attributes, and data structures
+   b. EXTREME CAUTION IN SELECTING: Transaction/message standards that happen to INCLUDE fields from this domain. Select ONLY if the data elements have VERY HIGH VALUE TO THE CREATION OF THE CDM
+
+4. **STANDARD NAME vs CONTENT**
+   a. Do not select/reject a Standard Format based on a name matching CDM keywords
+   b. Evaluate what data elements in the Standard Format actually define
+   c. A standard's name may not fully reflect its content scope
+
+5. **VERIFICATION**
+    a. For every NCPDP Standards format, review the data elements and provide a brief reasoning why it was or was not selected in the notes section.
 
 # Output Format
 
@@ -241,29 +250,30 @@ Respond with ONLY valid JSON:
   "ncpdp_general_standards": [
     {{
       "code": "X",
-      "name": "Standard Name from list above",
-      "reasoning": "Why this standard supports the CDM domain"
+      "name": "Standard Name",
+      "reasoning": "Primary purpose: [what it defines]. Relevant to {cdm['domain']} CDM because: [specific reason]."
     }}
   ],
   "ncpdp_script_standards": [
     {{
       "code": "SX",
-      "name": "SCRIPT Standard Name from list above", 
-      "reasoning": "Why this standard supports the CDM domain"
+      "name": "SCRIPT Standard Name", 
+      "reasoning": "Primary purpose: [what it defines]. Relevant to {cdm['domain']} CDM because: [specific reason]."
     }}
   ],
   "domain_assessment": {{
-    "ncpdp_relevance": "high | medium | low",
+    "ncpdp_relevance": "high | medium | low | none",
     "confidence": "high | medium | low",
-    "notes": "Brief assessment of NCPDP fit for this domain"
+    "notes": "Assessment of NCPDP fit for {cdm['domain']} domain."
   }}
 }}
 
 # Critical Requirements
 - Return ONLY valid JSON, no markdown or code blocks
 - Use ONLY codes from the provided lists above
-- Empty arrays are acceptable if no standards apply
-- Provide clear reasoning for each selection
+- Empty arrays are acceptable
+- Apply PRIMARY PURPOSE TEST to every candidate
+- Provide reasoning that explains primary purpose alignment
 
 Respond with JSON only:"""
 
@@ -321,7 +331,7 @@ Based on your knowledge of FHIR as well as industry understanding of Pharmacy Be
 2. **Resources INCLUDED in the CDM Only**
    a. The selected FHIR resource files are used in a downstream step to define the CDM entities and attributes. Another step defines the relationships between the CDMs.
    b. Return ONLY resources that represent entities and attributes IN this CDM.
-   c. Do NOT include additional **StructureDefinition** resources whose primary entity is modeled in a different CDM (for example, Person, Patient, Practitioner, Claim), even if they are referenced. However, you SHOULD include ValueSets and CodeSystems that are needed for the selected StructureDefinitions in this CDM.
+   c. Do NOT include additional **StructureDefinition** resources whose primary entity is modeled in a DIFFERENT CDM that would be expected in a PBM, Specialty Drug or Care Management organization, even if they are referenced. However, you SHOULD include ValueSets and CodeSystems that are needed for the selected StructureDefinitions in this CDM.
    d. For each FHIR resource selected, include an explanation as to why it was selected for this CDM.
 
 3. **IG Priority for Resource Selection**
@@ -341,7 +351,7 @@ Based on your knowledge of FHIR as well as industry understanding of Pharmacy Be
    a. When you select a StructureDefinition, identify the coded elements that are most important for this CDM's domain (for example: **type**, category, status, level, class, funding model, line of business, etc.). For those elements, you MUST include the ValueSets and CodeSystems that define their allowed values.
    b. Treat any element literally named "type" on the selected StructureDefinition (e.g., InsurancePlan.type, Organization.type, Contract.type) as a high-value classification field. If the IG defines a ValueSet or CodeSystem for that "type" element, you MUST include those terminology files in the output, as long as they exist in the relevant FHIR/IG packages.
    c. The StructureDefinition defines the entity structure; the ValueSets/CodeSystems define the valid values for coded elements. Without the needed supporting terminology, the downstream rationalization will have incomplete type mappings.
-   d. BALANCE IN SELECTING supporting files is CRITICAL. Include supporting terminology ONLY when it directly describes the core identity, classification, or administrative characteristics of the entity in this CDM. Avoid terminology that is primarily about detailed clinical content, detailed benefit logic, or processing rules that belong in other domains.   
+   d. BALANCE IN SELECTING supporting files is CRITICAL. Include supporting terminology ONLY when it directly describes the core identity, classification, or administrative characteristics of the entity in this CDM. Avoid terminology that is primarily about details, logic, or processing rules that belong in other domains.   
 
 6. **Exact Filenames**
    a. You have complete FHIR R4 and IG knowledge.
