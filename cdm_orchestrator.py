@@ -8,33 +8,67 @@ Interactive flow:
   3. Step-by-step execution with granular control
 
 Runs all steps from rationalization through Excel generation:
-  Step 1: Input Rationalization (1a: FHIR, 1b: Guardrails, 1c: Glue)
+  Step 1: Input Rationalization (1a: FHIR, 1b: NCPDP, 1c: Guardrails, 1d: Glue)
   Step 2: CDM Generation (2a: FHIR Foundation, 2b-2e: Refinements)
-  Step 3: Relationships & Constraints (future)
-  Step 4: DDL Generation (future)
+  Step 3: Build CDM Artifacts (3a: CDM JSON, 3b: DDL, 3c: LucidChart)
+  Step 4: Relationships & Model Construction (future)
   Step 5: Excel Generation (future)
 """
 from __future__ import annotations
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
-from src.config import load_config
-from src.core.llm_client import LLMClient
-from src.core.model_selector import MODEL_OPTIONS, select_model, prompt_user
-from src.steps.step1a_fhir import run_step1a
-from src.steps.step1b_guardrails import run_step1b
-from src.steps.step1c_glue import run_step1c
+print("[DEBUG] Standard imports done...")  # TEMP DEBUG
+
+try:
+    from src.config import load_config
+    print("[DEBUG] load_config imported")
+except Exception as e:
+    print(f"[DEBUG] Failed to import load_config: {e}")
+    sys.exit(1)
+
+try:
+    from src.core.llm_client import LLMClient
+    print("[DEBUG] LLMClient imported")
+except Exception as e:
+    print(f"[DEBUG] Failed to import LLMClient: {e}")
+    sys.exit(1)
+
+try:
+    from src.core.model_selector import MODEL_OPTIONS, select_model, prompt_user
+    print("[DEBUG] model_selector imported")
+except Exception as e:
+    print(f"[DEBUG] Failed to import model_selector: {e}")
+    sys.exit(1)
+
+print("[DEBUG] All imports complete")  # TEMP DEBUG
 
 load_dotenv()
 
+print("[DEBUG] dotenv loaded, entering main guard...")  # TEMP DEBUG
+
+
 def find_latest_config(base_name: str) -> Path:
     """Find latest timestamped config file from base name"""
-    config_dir = Path("config")
-    
     # Extract base name without extension
-    base = Path(base_name).stem  # e.g., "config_plan"
+    base = Path(base_name).stem  # e.g., "config_plan" or just "plan"
+    
+    # If just domain name provided, prefix with config_
+    if not base.startswith("config_"):
+        domain = base  # "plan"
+        base = f"config_{base}"  # "config_plan"
+    else:
+        # Extract domain from config_plan -> plan
+        domain = base.replace("config_", "")
+    
+    # Only one config location per CDM
+    config_dir = Path("input/business") / f"cdm_{domain}" / "config"
+    
+    if not config_dir.exists():
+        raise FileNotFoundError(f"Config directory not found: {config_dir}")
     
     # Find all matching timestamped configs
     pattern = f"{base}_*.json"
@@ -43,12 +77,13 @@ def find_latest_config(base_name: str) -> Path:
     if matches:
         return matches[0]
     
-    # Fallback to exact match
-    exact = config_dir / base_name
+    # Try exact match
+    exact = config_dir / f"{base}.json"
     if exact.exists():
         return exact
     
-    raise FileNotFoundError(f"No config file found matching: {base_name}")
+    raise FileNotFoundError(f"No config file found matching: {base_name} in {config_dir}")
+
 
 def main():
     ap = argparse.ArgumentParser(
@@ -56,11 +91,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:
+  python cdm_orchestrator.py plan
   python cdm_orchestrator.py config_plan.json
         """
     )
     
-    ap.add_argument("config", help="Config file base name (e.g., config_plan.json)")
+    ap.add_argument("config", help="Config file base name or domain (e.g., 'plan' or 'config_plan.json')")
     
     args = ap.parse_args()
     
@@ -73,6 +109,7 @@ Example:
         config = load_config(str(config_file))
         print(f"✓ Configuration loaded")
         print(f"  Domain: {config.cdm.domain}")
+        print(f"  Type: {config.cdm.type}")
         print(f"  Description: {config.cdm.description}")
         
         # === 1. DRY RUN OR LIVE? ===
@@ -104,16 +141,16 @@ Example:
         # === 3. STEP SELECTION ===
         print(f"\n{'='*60}")
         print("Available steps:")
-        print("  1 - Input Rationalization (FHIR, Guardrails, Glue)")
+        print("  1 - Input Rationalization (FHIR, NCPDP, Guardrails, Glue)")
         print("  2 - CDM Generation (FHIR Foundation + Refinements)")
-        print("  3 - Relationships & Model Construction (not yet implemented)")
-        print("  4 - DDL Generation (not yet implemented)")
+        print("  3 - Build CDM Artifacts (CDM JSON, DDL, LucidChart)")
+        print("  4 - Relationships & Model Construction (not yet implemented)")
         print("  5 - Excel Generation (not yet implemented)")
         
         steps_input = input("\nEnter steps to run (comma-separated, e.g., '1,2' or 'all') [1]: ").strip()
         
         if steps_input.lower() == 'all':
-            steps_to_run = {1, 2}  # Only implemented steps
+            steps_to_run = {1, 2, 3}  # Implemented steps
         elif not steps_input:
             steps_to_run = {1}  # Default
         else:
@@ -153,65 +190,82 @@ Example:
             
             # Prompt for what to process
             process_fhir = False
+            process_ncpdp = False
             process_guardrails = False
             process_glue = False
             
-            if config.inputs.fhir:
-                print(f"\nFound {len(config.inputs.fhir)} FHIR file(s)")
+            if config.has_fhir():
+                print(f"\nFound {len(config.fhir_igs)} FHIR resource(s)")
+                print(f"  StructureDefinitions: {len(config.get_structure_definitions())}")
+                print(f"  ValueSets: {len(config.get_value_sets())}")
+                print(f"  CodeSystems: {len(config.get_code_systems())}")
                 process_fhir = prompt_user("Process FHIR files?", default="Y")
             
-            if config.inputs.guardrails:
-                print(f"\nFound {len(config.inputs.guardrails)} Guardrails file(s)")
+            if config.has_ncpdp():
+                general_count = len(config.ncpdp_general_standards)
+                script_count = len(config.ncpdp_script_standards)
+                print(f"\nFound NCPDP standards (General: {general_count}, SCRIPT: {script_count})")
+                process_ncpdp = prompt_user("Process NCPDP standards?", default="Y")
+            
+            if config.has_guardrails():
+                print(f"\nFound {len(config.guardrails)} Guardrails file(s)")
                 process_guardrails = prompt_user("Process Guardrails files?", default="Y")
             
-            if config.inputs.glue:
-                print(f"\nFound {len(config.inputs.glue)} Glue schema file(s)")
+            if config.has_glue():
+                print(f"\nFound {len(config.glue)} Glue schema file(s)")
                 process_glue = prompt_user("Process Glue schemas?", default="Y")
             
-            # Step 1a: FHIR
+            # Step 1a: FHIR Rationalization
             if process_fhir:
                 print(f"\n=== Step 1a: FHIR Rationalization ===")
-                run_step1a(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm if not dry_run else None,
-                    dry_run=dry_run
-                )
-            
-            # Step 1b: Guardrails
-            if process_guardrails:
-                print(f"\n=== Step 1b: Guardrails Rationalization ===")
-                run_step1b(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm if not dry_run else None,
-                    dry_run=dry_run
-                )
-            
-            # Step 1c: Glue
-            if process_glue:
-                print(f"\n=== Step 1c: Glue Schema Rationalization ===")
-                run_step1c(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm if not dry_run else None,
-                    dry_run=dry_run
-                )
-            
-            # Step 1d: NCPDP Rationalization
-            ncpdp_general = Path("input/strd_ncpdp/ncpdp_general_standards.json")
-            ncpdp_script = Path("input/strd_ncpdp/ncpdp_script_standards.json")
-            
-            if ncpdp_general.exists() or ncpdp_script.exists():
-                print(f"\nFound NCPDP standards files")
-                process_ncpdp = prompt_user("Process NCPDP standards?", default="Y")
+                from src.rationalizers.rationalize_fhir import FHIRRationalizer
                 
-                if process_ncpdp:
-                    print(f"\n=== Step 1d: NCPDP Rationalization ===")
-                    from src.rationalizers.rationalize_ncpdp import NCPDPRationalizer
-                    
-                    rationalizer = NCPDPRationalizer(str(config_file))
-                    rationalizer.run(str(ncpdp_general), str(ncpdp_script), str(rationalized_outdir))
+                rationalizer = FHIRRationalizer(
+                    config_path=str(config_file),
+                    llm=llm if not dry_run else None,
+                    dry_run=dry_run
+                )
+                
+                rationalizer.run(str(rationalized_outdir))
+            
+            # Step 1b: NCPDP Rationalization
+            if process_ncpdp:
+                print(f"\n=== Step 1b: NCPDP Rationalization ===")
+                from src.rationalizers.rationalize_ncpdp import NCPDPRationalizer
+                
+                ncpdp_general = Path("input/strd_ncpdp/ncpdp_general_standards.json")
+                ncpdp_script = Path("input/strd_ncpdp/ncpdp_script_standards.json")
+                
+                rationalizer = NCPDPRationalizer(
+                    config_path=str(config_file),
+                    llm=llm if not dry_run else None,
+                    dry_run=dry_run
+                )
+                rationalizer.run(str(ncpdp_general), str(ncpdp_script), str(rationalized_outdir))
+            
+            # Step 1c: Guardrails Rationalization
+            if process_guardrails:
+                print(f"\n=== Step 1c: Guardrails Rationalization ===")
+                from src.rationalizers.rationalize_guardrails import GuardrailsRationalizer
+                
+                rationalizer = GuardrailsRationalizer(
+                    config_path=str(config_file),
+                    llm=llm if not dry_run else None,
+                    dry_run=dry_run
+                )
+                rationalizer.run(str(rationalized_outdir))
+            
+            # Step 1d: Glue Rationalization
+            if process_glue:
+                print(f"\n=== Step 1d: Glue Schema Rationalization ===")
+                from src.rationalizers.rationalize_glue import GlueRationalizer
+                
+                rationalizer = GlueRationalizer(
+                    config_path=str(config_file),
+                    llm=llm if not dry_run else None,
+                    dry_run=dry_run
+                )
+                rationalizer.run(str(rationalized_outdir))
             
             print(f"\n{'='*60}")
             print(f"✓ STEP 1 COMPLETE")
@@ -249,9 +303,10 @@ Example:
             if not any([run_2a, run_2b, run_2c, run_2d, run_2e]):
                 print("  ⚠️  No Step 2 substeps selected, skipping Step 2")
             else:
+                rationalized_outdir = base_outdir / "rationalized"
+                
                 # Find rationalized FHIR from Step 1 (needed for 2a)
                 if run_2a:
-                    rationalized_outdir = base_outdir / "rationalized"
                     if not rationalized_outdir.exists():
                         print("  ❌ ERROR: Step 1 output not found. Run Step 1a first.")
                         sys.exit(1)
@@ -343,9 +398,74 @@ Example:
                 print(f"  CDM files saved to: {cdm_outdir}")
                 print(f"{'='*60}")
         
-        # === STEP 3-5: FUTURE ===
-        if any(s in steps_to_run for s in [3, 4, 5]):
-            print(f"\nSteps 3-5 not yet implemented.")
+        # === STEP 3: BUILD CDM ARTIFACTS ===
+        if 3 in steps_to_run:
+            print(f"\n{'='*60}")
+            print(f"STEP 3: BUILD CDM ARTIFACTS")
+            print(f"{'='*60}")
+            
+            cdm_outdir = base_outdir / "cdm"
+            cdm_outdir.mkdir(parents=True, exist_ok=True)
+            
+            if dry_run:
+                print(f"\n🔍 DRY RUN MODE - Prompts will be saved to: {cdm_outdir / 'prompts'}")
+            
+            # Step 3a: Build Foundational CDM
+            print(f"\n=== Step 3a: Build Foundational CDM ===")
+            from src.cdm_builder.build_foundational_cdm import run_step3a
+            
+            rationalized_dir = base_outdir / "rationalized"
+            
+            cdm = run_step3a(
+                config=config,
+                outdir=cdm_outdir,
+                llm=llm,
+                dry_run=dry_run,
+                rationalized_dir=rationalized_dir
+            )
+            
+            # Steps 3b/3c only run if CDM was generated (not dry run)
+            if cdm:
+                # Step 3b: Generate DDL
+                print(f"\n=== Step 3b: Generate SQL DDL ===")
+                from src.cdm_builder.generate_ddl import DDLGenerator
+                
+                generator = DDLGenerator(dialect="sqlserver", schema="dbo", catalog="CDM")
+                ddl = generator.generate(cdm)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                domain_safe = config.cdm.domain.lower().replace(' ', '_')
+                ddl_file = cdm_outdir / f"ddl_{domain_safe}_{timestamp}.sql"
+                
+                with open(ddl_file, 'w', encoding='utf-8') as f:
+                    f.write(ddl)
+                
+                entity_count = len(cdm.get("entities", []))
+                print(f"   ✅ DDL generated: {entity_count} tables")
+                print(f"   📄 Saved to: {ddl_file}")
+                
+                # Step 3c: Generate LucidChart CSV
+                print(f"\n=== Step 3c: Generate LucidChart CSV ===")
+                from src.cdm_builder.ddl_to_lucidchart import ddl_to_lucidchart
+                
+                lucid_file = cdm_outdir / f"lucidchart_{domain_safe}_{timestamp}.csv"
+                
+                rows = ddl_to_lucidchart(
+                    ddl_file=ddl_file,
+                    output_file=lucid_file,
+                    dialect="sqlserver",
+                    schema="dbo",
+                    catalog="CDM"
+                )
+            
+            print(f"\n{'='*60}")
+            print(f"✓ STEP 3 COMPLETE")
+            print(f"  CDM artifacts saved to: {cdm_outdir}")
+            print(f"{'='*60}")
+        
+        # === STEP 4-5: FUTURE ===
+        if any(s in steps_to_run for s in [4, 5]):
+            print(f"\nSteps 4-5 not yet implemented.")
         
         print(f"\n{'='*60}")
         print("ORCHESTRATION COMPLETE")
@@ -362,6 +482,7 @@ Example:
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

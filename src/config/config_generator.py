@@ -1,10 +1,12 @@
 """
-Config Generator for CDM Creation Application - Version 2.0
+Config Generator for CDM Creation Application - Version 2.1
 
 Completes chatbot-filled config templates by:
 1. Reading partial config from chatbot
 2. Prompting for thresholds
 3. Using AI to determine required FHIR/IG resources (exact filenames)
+   - Pass 1: Primary resources for CDM domain
+   - Pass 2: Referenced resources (e.g., Organization for InsurancePlan)
 4. Using AI to determine required NCPDP standards
 5. Validating all files exist
 6. Generating complete config JSON
@@ -14,6 +16,7 @@ Features:
 - Preserves skipped sections from most recent timestamped config
 - Timestamped outputs: config_plan_20251121_232439.json
 - timeout=1800, encoding='utf-8', list/dict NCPDP handling
+- NEW in 2.1: Two-pass FHIR analysis to capture referenced resources
 
 Usage:
     python src/config/config_generator.py input/business/cdm_plan/config/config_plan.json
@@ -127,11 +130,17 @@ class ConfigGenerator:
         return response not in ['n', 'no']
     
     def determine_fhir_resources(self, partial_config: Dict) -> Dict:
-        """Use AI to determine required FHIR/IG resources with exact filenames."""
+        """Use AI to determine required FHIR/IG resources with exact filenames.
         
+        Two-pass approach:
+        - Pass 1: Select primary resources for the CDM domain
+        - Pass 2: Identify and add critical referenced resources (e.g., Organization)
+        """
+        
+        # Pass 1: Primary resource selection
         prompt = self._build_fhir_determination_prompt(partial_config)
         
-        print("\n🤖 Analyzing FHIR/IG requirements with AI...\n")
+        print("\n🤖 Pass 1: Analyzing FHIR/IG requirements with AI...\n")
         
         try:
             # Use chat() method and parse JSON
@@ -139,8 +148,11 @@ class ConfigGenerator:
             response_text, _ = self.llm_client.chat(messages)
             
             # Parse JSON response
-            result = json.loads(response_text)
-            return result
+            pass1_result = json.loads(response_text)
+            
+            # Display Pass 1 results
+            pass1_resources = pass1_result.get('fhir_igs', [])
+            print(f"   Pass 1 selected {len(pass1_resources)} resources")
             
         except json.JSONDecodeError as e:
             print(f"Error parsing AI response as JSON: {e}")
@@ -149,6 +161,70 @@ class ConfigGenerator:
         except Exception as e:
             print(f"Error during FHIR AI analysis: {e}")
             raise
+        
+        # Pass 2: Reference resolution
+        pass2_result = self.determine_fhir_references(partial_config, pass1_resources)
+        
+        # Merge results
+        additional_resources = pass2_result.get('additional_fhir_igs', [])
+        if additional_resources:
+            # Check for duplicates before adding
+            existing_filenames = {r['filename'] for r in pass1_resources}
+            for resource in additional_resources:
+                if resource['filename'] not in existing_filenames:
+                    pass1_resources.append(resource)
+                    print(f"   + Added from references: {resource['resource_name']}")
+        
+        # Update assessment with Pass 2 info
+        domain_assessment = pass1_result.get('domain_assessment', {})
+        domain_assessment['pass2_resources_added'] = len(additional_resources)
+        domain_assessment['pass2_assessment'] = pass2_result.get('pass2_assessment', {})
+        
+        return {
+            'fhir_igs': pass1_resources,
+            'domain_assessment': domain_assessment
+        }
+    
+    def determine_fhir_references(self, partial_config: Dict, pass1_resources: List[Dict]) -> Dict:
+        """Pass 2: Identify and add critical referenced FHIR resources."""
+        
+        # Skip if no StructureDefinitions were selected in Pass 1
+        structure_defs = [r for r in pass1_resources if r.get('file_type') == 'StructureDefinition']
+        if not structure_defs:
+            print("   ℹ️  No StructureDefinitions in Pass 1, skipping reference analysis")
+            return {'additional_fhir_igs': [], 'pass2_assessment': {}}
+        
+        prompt = self._build_fhir_references_prompt(partial_config, pass1_resources)
+        
+        print("\n🤖 Pass 2: Analyzing FHIR references...\n")
+        
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response_text, _ = self.llm_client.chat(messages)
+            
+            # Parse JSON response
+            result = json.loads(response_text)
+            
+            # Display results
+            added = result.get('additional_fhir_igs', [])
+            assessment = result.get('pass2_assessment', {})
+            
+            if added:
+                print(f"   Found {len(added)} additional resources from references:")
+                for r in added:
+                    print(f"      + {r['resource_name']} ({r['file_type']})")
+            else:
+                print("   No additional referenced resources needed")
+            
+            return result
+            
+        except json.JSONDecodeError as e:
+            print(f"Error parsing Pass 2 AI response as JSON: {e}")
+            print(f"Response text: {response_text[:500]}...")
+            return {'additional_fhir_igs': [], 'pass2_assessment': {'error': str(e)}}
+        except Exception as e:
+            print(f"Error during FHIR Pass 2 analysis: {e}")
+            return {'additional_fhir_igs': [], 'pass2_assessment': {'error': str(e)}}
     
     def determine_ncpdp_standards(self, partial_config: Dict) -> Dict:
         """Use AI to determine required NCPDP standards."""
@@ -356,7 +432,7 @@ Based on your knowledge of FHIR as well as industry understanding of Pharmacy Be
 6. **Exact Filenames**
    a. You have complete FHIR R4 and IG knowledge.
    b. Return EXACT filenames as they appear in standard IGs.
-   c. Use standard IG file naming conventions.
+   c. Avoid using canonical FHIR names, ONLY use standard IG file naming conventions.
 
 # Output Format
 
@@ -407,8 +483,128 @@ Respond with ONLY valid JSON:
 
 Respond with JSON only:"""
     
-    def validate_and_match_files(self, partial_config: Dict, fhir_resources: Dict, ncpdp_resources: Dict) -> Tuple[Dict, List[str]]:
-        """Validate input files exist and match AI-determined resources to actual files."""
+    def _build_fhir_references_prompt(self, partial_config: Dict, selected_resources: List[Dict]) -> str:
+        """Build prompt for Pass 2: identify critical referenced resources."""
+        
+        cdm = partial_config['cdm']
+        
+        # Format selected resources for the prompt
+        resources_list = "\n".join([
+            f"   - {r['resource_name']} ({r['file_type']}) from {r['ig_source']}"
+            for r in selected_resources
+            if r.get('file_type') == 'StructureDefinition'
+        ])
+        
+        return f"""You are a FHIR expert performing Pass 2 analysis: identifying CRITICAL referenced resources.
+
+# Context
+
+In Pass 1, we selected these FHIR StructureDefinitions for the {cdm['domain']} CDM:
+
+{resources_list}
+
+# Task
+
+For each selected StructureDefinition above:
+1. Identify elements with Reference() types that point to OTHER resources
+2. Determine if those referenced resources contain data CRITICAL to this CDM
+3. Return additional StructureDefinitions (and their ValueSets/CodeSystems) that should be included
+
+# CDM Metadata
+- **Domain**: {cdm['domain']}
+- **Type**: {cdm['type']}
+- **Description**: {cdm['description']}
+
+# CRITICAL Rules for Reference Analysis
+
+1. **Include Referenced Resource IF:**
+   a. It contains identity/classification data for entities in THIS CDM
+   b. Business attributes (carrier name, sponsor address, organization phone) would be UNMAPPED without it
+   c. The reference is to a resource that DEFINES entities, not just links to them
+   
+   Examples that SHOULD be included:
+   - InsurancePlan.ownedBy → Reference(Organization) → Organization has carrier/payer identity
+   - InsurancePlan.administeredBy → Reference(Organization) → Organization has admin details
+   - Contract.subject → Reference(Organization) → Organization has party details
+   - ExplanationOfBenefit.insurer → Reference(Organization) → payer identity
+
+2. **Do NOT Include Referenced Resource IF:**
+   a. It represents a DIFFERENT CDM domain entirely (e.g., Patient, Practitioner, Medication)
+   b. The reference is transactional/operational, not definitional
+   c. Including it would significantly expand scope beyond THIS CDM's purpose
+   
+   Examples that should NOT be included:
+   - InsurancePlan.coverage.benefit → DO NOT add separate Benefit resource (that's Benefit CDM)
+   - Coverage.beneficiary → Reference(Patient) → Patient is separate CDM
+   - Claim.provider → Reference(Practitioner) → Practitioner is separate CDM
+
+3. **Organization Resource - Special Handling:**
+   a. Organization is frequently referenced by Plan, Contract, Coverage resources
+   b. It contains: name, identifier, telecom (phone), address, type, partOf
+   c. For Plan/Benefit CDM: Organization is USUALLY REQUIRED for carrier/sponsor/payer identity
+   d. For other CDMs: Evaluate based on whether payer/organization identity is IN SCOPE
+
+# Output Format
+
+Respond with ONLY valid JSON:
+
+{{
+  "referenced_resources_analysis": [
+    {{
+      "source_resource": "InsurancePlan",
+      "reference_element": "ownedBy",
+      "referenced_resource": "Organization",
+      "include": true,
+      "reasoning": "Organization contains carrier identity (name, address, phone) needed for Plan CDM"
+    }},
+    {{
+      "source_resource": "InsurancePlan", 
+      "reference_element": "coverage.benefit",
+      "referenced_resource": "Benefit",
+      "include": false,
+      "reasoning": "Benefit details belong in separate Benefit/Formulary CDM, not Plan identity CDM"
+    }}
+  ],
+  "additional_fhir_igs": [
+    {{
+      "filename": "StructureDefinition-Organization.json",
+      "resource_name": "Organization",
+      "file_type": "StructureDefinition",
+      "ig_source": "FHIR R4 Base",
+      "priority": 1,
+      "reasoning": "Referenced by InsurancePlan.ownedBy/administeredBy. Contains carrier/payer identity data (name, address, telecom) needed for Plan CDM."
+    }},
+    {{
+      "filename": "ValueSet-organization-type.json",
+      "resource_name": "OrganizationType",
+      "file_type": "ValueSet",
+      "ig_source": "FHIR R4 Base",
+      "priority": 1,
+      "reasoning": "Defines organization classification (payer, provider, etc.) for Organization.type"
+    }}
+  ],
+  "pass2_assessment": {{
+    "references_analyzed": 5,
+    "resources_added": 2,
+    "confidence": "high | medium | low",
+    "notes": "Brief summary of reference analysis for {cdm['domain']} CDM"
+  }}
+}}
+
+# Critical Requirements
+- Return ONLY valid JSON, no markdown or code blocks
+- Use exact FHIR R4/IG standard filenames
+- Only add resources that contain CRITICAL data for THIS CDM
+- Provide clear reasoning for include/exclude decisions
+- Empty additional_fhir_igs array is valid if no critical references found
+
+Respond with JSON only:"""
+    
+    def validate_and_match_files(self, partial_config: Dict, fhir_resources: Dict, ncpdp_resources: Dict, existing_config: Optional[Dict] = None) -> Tuple[Dict, List[str]]:
+        """Validate input files exist and match AI-determined resources to actual files.
+        
+        If existing_config is provided, guardrails/glue/ddl are taken from it instead of partial_config.
+        """
         
         warnings = []
         matched_files = {
@@ -422,9 +618,15 @@ Respond with JSON only:"""
         
         print("\n📂 Validating Files...\n")
         
-        # Validate and normalize chatbot-provided files
+        # Validate and normalize guardrails/glue/ddl files
+        # If existing_config exists, use it; otherwise use partial_config (base template)
         for source in ['guardrails', 'glue', 'ddl']:
-            files = partial_config['input_files'].get(source, [])
+            if existing_config and source in existing_config.get('input_files', {}):
+                files = existing_config['input_files'].get(source, [])
+                source_label = "existing config"
+            else:
+                files = partial_config['input_files'].get(source, [])
+                source_label = "base template"
             
             found = 0
             for filepath_str in files:
@@ -438,7 +640,7 @@ Respond with JSON only:"""
                 else:
                     warnings.append(f"⚠️  {source.capitalize()}: File not found: {filepath}")
             
-            print(f"   {source.capitalize()}: {found}/{len(files)} files found")
+            print(f"   {source.capitalize()}: {found}/{len(files)} files found (from {source_label})")
         
         # Match FHIR/IG resources
         print(f"\n   FHIR/IG Resources:")
@@ -592,7 +794,7 @@ Respond with JSON only:"""
                     "fhir_assessment": fhir_resources.get('domain_assessment', {}),
                     "ncpdp_assessment": ncpdp_resources.get('domain_assessment', {})
                 },
-                "generator_version": "2.0"
+                "generator_version": "2.1"
             }
         }
         
@@ -626,7 +828,7 @@ Respond with JSON only:"""
     def run(self, partial_config_file: str):
         """Execute full config completion workflow."""
         try:
-            print("\n=== CDM Configuration Generator v2.0 ===\n")
+            print("\n=== CDM Configuration Generator v2.1 ===\n")
             
             # Step 1: Load partial config
             print(f"📄 Loading partial config: {partial_config_file}")
@@ -671,6 +873,10 @@ Respond with JSON only:"""
                 print(f"\n   Primary IGs: {', '.join(fhir_assessment.get('primary_igs', []))}")
                 print(f"   Expected Entities: {fhir_assessment.get('expected_entity_count', 'unknown')}")
                 print(f"   Confidence: {fhir_assessment.get('confidence', 'unknown')}")
+                
+                # Show Pass 2 results if any
+                if fhir_assessment.get('pass2_resources_added', 0) > 0:
+                    print(f"   Pass 2 Resources Added: {fhir_assessment.get('pass2_resources_added')}")
             else:
                 print("\n⏭️  Skipping FHIR analysis")
                 if existing_config and 'fhir_igs' in existing_config.get('input_files', {}):
@@ -725,7 +931,8 @@ Respond with JSON only:"""
             matched_files, warnings = self.validate_and_match_files(
                 partial_config, 
                 fhir_resources, 
-                ncpdp_resources
+                ncpdp_resources,
+                existing_config
             )
             
             # Step 6: Generate final config

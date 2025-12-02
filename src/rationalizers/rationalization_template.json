@@ -1,0 +1,73 @@
+{
+  "_template_version": "3.0",
+  "_description": "Generic rationalization format. ONE source type per file. All fields are generic - omit if not applicable.",
+  "_file_naming": "rationalized_{source_type}_{cdm_domain}_{timestamp}.json",
+
+  "rationalization_metadata": {
+    "source_type": "fhir | ncpdp_general | ncpdp_script | guardrails | ddl_glue",
+    "cdm_domain": "Plan",
+    "cdm_classification": "Core | Functional",
+    "rationalization_timestamp": "2025-11-29T20:00:00.000000",
+    "source_files": ["file1.json", "file2.xlsx"],
+    "ai_reasoning": "Why these resources/standards/tables selected"
+  },
+
+  "entities": [
+    {
+      "entity_name": "InsurancePlan",
+      "source": "InsurancePlan | H | Data Elements Plan | plan_event",
+      "source_detail": "HL7 FHIR R4 | Health Care ID Card | Hierarchy API v1.5 | navitus_bpm",
+      "description": "Defines the structure and characteristics of an insurance plan",
+      "business_purpose": "Core plan identity for routing and administration",
+      "business_context": "Used across all pharmacy benefit transactions",
+      "priority": 1,
+      "ai_selection_reasoning": "Primary plan entity...",
+
+      "attributes": [
+        {
+          "attribute_name": "plan_id",
+          "source_ref": "InsurancePlan.identifier | 301-C1 | GR_Plan.xlsx::Setup | plan_id",
+          "data_type": "VARCHAR(64)",
+          "source_data_type": "Identifier | x(64) | string | bigint",
+          "source_length": "64",
+          "description": "Unique identifier for the plan",
+          "nullable": false,
+          "required": true,
+          "cardinality": "1..1 | 0..* | null",
+          "business_purpose": "Primary key for plan lookups",
+          "business_context": "Used to route pharmacy claims",
+          "data_classification": "Internal | PII | PHI",
+          "is_pii": false,
+          "is_phi": false,
+          "validation_rules": ["Required", "Must be unique"],
+          "business_rules": ["Must match sponsor hierarchy"],
+          "constraints": ["NOT NULL", "PRIMARY KEY"],
+          "binding": {"strength": "required", "valueSet": "http://..."},
+          "calculated_field": false,
+          "calculation_logic": "formula if calculated",
+          "alias": "planId"
+        }
+      ],
+
+      "relationships": [
+        {
+          "related_entity": "Coverage",
+          "relationship_type": "one-to-many",
+          "cardinality": "1:N",
+          "foreign_key_attribute": "plan_id",
+          "description": "Plan contains multiple coverage periods"
+        }
+      ],
+
+      "keys": [
+        {
+          "key_type": "primary | foreign | unique",
+          "key_name": "PK_plan",
+          "columns": ["plan_id"],
+          "references": "Sponsor.sponsor_id",
+          "inferred": false
+        }
+      ]
+    }
+  ]
+}
