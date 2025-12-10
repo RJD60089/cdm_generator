@@ -8,11 +8,16 @@ Interactive flow:
   3. Step-by-step execution with granular control
 
 Runs all steps from rationalization through Excel generation:
-  Step 1: Input Rationalization (1a: FHIR, 1b: NCPDP, 1c: Guardrails, 1d: Glue)
-  Step 2: CDM Generation (2a: FHIR Foundation, 2b-2e: Refinements)
-  Step 3: Build CDM Artifacts (3a: CDM JSON, 3b: DDL, 3c: LucidChart)
-  Step 4: Relationships & Model Construction (future)
-  Step 5: Excel Generation (future)
+  1 - Input Rationalization (FHIR, NCPDP, Guardrails, Glue)
+  2 - Identify Foundational CDM Generation Mode
+  3 - Build Foundational CDM (CDM JSON)
+  4 - Refinement - Consolidation (merge overlapping entities)
+  5 - Refinement - PK/FK Validation (validate keys & relationships)
+  6 - Build Full CDM (cross-reference all sources)
+      6-POST - Post-Processing (CDE Identification, expandable)
+  7 - Generate Artifacts (DDL, LucidChart CSV, Excel, Word)
+  8 - Refinement - Naming Standards (not yet implemented)
+  9 - Excel Generation (not yet implemented)
 """
 from __future__ import annotations
 import argparse
@@ -21,34 +26,11 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
-print("[DEBUG] Standard imports done...")  # TEMP DEBUG
-
-try:
-    from src.config import load_config
-    print("[DEBUG] load_config imported")
-except Exception as e:
-    print(f"[DEBUG] Failed to import load_config: {e}")
-    sys.exit(1)
-
-try:
-    from src.core.llm_client import LLMClient
-    print("[DEBUG] LLMClient imported")
-except Exception as e:
-    print(f"[DEBUG] Failed to import LLMClient: {e}")
-    sys.exit(1)
-
-try:
-    from src.core.model_selector import MODEL_OPTIONS, select_model, prompt_user
-    print("[DEBUG] model_selector imported")
-except Exception as e:
-    print(f"[DEBUG] Failed to import model_selector: {e}")
-    sys.exit(1)
-
-print("[DEBUG] All imports complete")  # TEMP DEBUG
+from src.config import load_config
+from src.core.llm_client import LLMClient
+from src.core.model_selector import MODEL_OPTIONS, select_model, prompt_user
 
 load_dotenv()
-
-print("[DEBUG] dotenv loaded, entering main guard...")  # TEMP DEBUG
 
 
 def find_latest_config(base_name: str) -> Path:
@@ -83,6 +65,24 @@ def find_latest_config(base_name: str) -> Path:
         return exact
     
     raise FileNotFoundError(f"No config file found matching: {base_name} in {config_dir}")
+
+
+def find_existing_full_cdm(base_outdir: Path, domain: str) -> Path | None:
+    """Check if Full CDM exists for this domain."""
+    domain_safe = domain.lower().replace(' ', '_')
+    full_cdm_dir = base_outdir / "full_cdm"
+    
+    if not full_cdm_dir.exists():
+        return None
+    
+    pattern = f"cdm_{domain_safe}_full_*.json"
+    matches = list(full_cdm_dir.glob(pattern))
+    
+    if not matches:
+        return None
+    
+    matches.sort(reverse=True)
+    return matches[0]
 
 
 def main():
@@ -142,15 +142,20 @@ Example:
         print(f"\n{'='*60}")
         print("Available steps:")
         print("  1 - Input Rationalization (FHIR, NCPDP, Guardrails, Glue)")
-        print("  2 - CDM Generation (FHIR Foundation + Refinements)")
-        print("  3 - Build CDM Artifacts (CDM JSON, DDL, LucidChart)")
-        print("  4 - Relationships & Model Construction (not yet implemented)")
-        print("  5 - Excel Generation (not yet implemented)")
+        print("  2 - Identify Foundational CDM Generation Mode")
+        print("  3 - Build Foundational CDM (CDM JSON)")
+        print("  4 - Refinement - Consolidation (merge overlapping entities)")
+        print("  5 - Refinement - PK/FK Validation (validate keys & relationships)")
+        print("  6 - Build Full CDM (cross-reference all sources)")
+        print("      └─ Post-Processing (CDE Identification)")
+        print("  7 - Generate Artifacts (DDL, LucidChart CSV, Excel, Word)")
+        print("  8 - Refinement - Naming Standards (not yet implemented)")
+        print("  9 - Excel Generation (not yet implemented)")
         
-        steps_input = input("\nEnter steps to run (comma-separated, e.g., '1,2' or 'all') [1]: ").strip()
+        steps_input = input("\nEnter steps to run (comma-separated, e.g., '1,2,3' or 'all') [1]: ").strip()
         
         if steps_input.lower() == 'all':
-            steps_to_run = {1, 2, 3}  # Implemented steps
+            steps_to_run = {1, 2, 3, 4, 5, 6, 7}  # Implemented steps
         elif not steps_input:
             steps_to_run = {1}  # Default
         else:
@@ -166,6 +171,9 @@ Example:
         # Create base output directory
         base_outdir = Path(config.output.directory)
         base_outdir.mkdir(parents=True, exist_ok=True)
+        
+        # Track CDM generation mode (set in Step 2, used in Step 3)
+        cdm_generation_mode = None
         
         print(f"\n{'='*60}")
         print(f"CDM GENERATION ORCHESTRATOR")
@@ -195,214 +203,142 @@ Example:
             process_glue = False
             
             if config.has_fhir():
-                print(f"\nFound {len(config.fhir_igs)} FHIR resource(s)")
-                print(f"  StructureDefinitions: {len(config.get_structure_definitions())}")
-                print(f"  ValueSets: {len(config.get_value_sets())}")
-                print(f"  CodeSystems: {len(config.get_code_systems())}")
-                process_fhir = prompt_user("Process FHIR files?", default="Y")
+                process_fhir = prompt_user("Process FHIR resources?", default="Y")
+            else:
+                print("  ℹ️  No FHIR resources configured")
             
             if config.has_ncpdp():
-                general_count = len(config.ncpdp_general_standards)
-                script_count = len(config.ncpdp_script_standards)
-                print(f"\nFound NCPDP standards (General: {general_count}, SCRIPT: {script_count})")
                 process_ncpdp = prompt_user("Process NCPDP standards?", default="Y")
+            else:
+                print("  ℹ️  No NCPDP standards configured")
             
             if config.has_guardrails():
-                print(f"\nFound {len(config.guardrails)} Guardrails file(s)")
                 process_guardrails = prompt_user("Process Guardrails files?", default="Y")
+            else:
+                print("  ℹ️  No Guardrails files configured")
             
             if config.has_glue():
-                print(f"\nFound {len(config.glue)} Glue schema file(s)")
-                process_glue = prompt_user("Process Glue schemas?", default="Y")
+                process_glue = prompt_user("Process Glue tables?", default="Y")
+            else:
+                print("  ℹ️  No Glue tables configured")
             
-            # Step 1a: FHIR Rationalization
+            if not any([process_fhir, process_ncpdp, process_guardrails, process_glue]):
+                print("  ⚠️  No sources selected for processing")
+            
+            # Step 1a: FHIR
             if process_fhir:
                 print(f"\n=== Step 1a: FHIR Rationalization ===")
-                from src.rationalizers.rationalize_fhir import FHIRRationalizer
+                from src.rationalizers import run_fhir_rationalization
                 
-                rationalizer = FHIRRationalizer(
-                    config_path=str(config_file),
-                    llm=llm if not dry_run else None,
-                    dry_run=dry_run
+                run_fhir_rationalization(
+                    config=config,
+                    outdir=rationalized_outdir,
+                    llm=llm,
+                    dry_run=dry_run,
+                    config_path=str(config_file)
                 )
-                
-                rationalizer.run(str(rationalized_outdir))
             
-            # Step 1b: NCPDP Rationalization
+            # Step 1b: NCPDP
             if process_ncpdp:
                 print(f"\n=== Step 1b: NCPDP Rationalization ===")
-                from src.rationalizers.rationalize_ncpdp import NCPDPRationalizer
+                from src.rationalizers import run_ncpdp_rationalization
                 
-                ncpdp_general = Path("input/strd_ncpdp/ncpdp_general_standards.json")
-                ncpdp_script = Path("input/strd_ncpdp/ncpdp_script_standards.json")
-                
-                rationalizer = NCPDPRationalizer(
-                    config_path=str(config_file),
-                    llm=llm if not dry_run else None,
-                    dry_run=dry_run
+                run_ncpdp_rationalization(
+                    config=config,
+                    outdir=rationalized_outdir,
+                    llm=llm,
+                    dry_run=dry_run,
+                    config_path=str(config_file)
                 )
-                rationalizer.run(str(ncpdp_general), str(ncpdp_script), str(rationalized_outdir))
             
-            # Step 1c: Guardrails Rationalization
+            # Step 1c: Guardrails
             if process_guardrails:
                 print(f"\n=== Step 1c: Guardrails Rationalization ===")
-                from src.rationalizers.rationalize_guardrails import GuardrailsRationalizer
+                from src.rationalizers import run_guardrails_rationalization
                 
-                rationalizer = GuardrailsRationalizer(
-                    config_path=str(config_file),
-                    llm=llm if not dry_run else None,
-                    dry_run=dry_run
+                run_guardrails_rationalization(
+                    config=config,
+                    outdir=rationalized_outdir,
+                    llm=llm,
+                    dry_run=dry_run,
+                    config_path=str(config_file)
                 )
-                rationalizer.run(str(rationalized_outdir))
             
-            # Step 1d: Glue Rationalization
+            # Step 1d: Glue
             if process_glue:
-                print(f"\n=== Step 1d: Glue Schema Rationalization ===")
-                from src.rationalizers.rationalize_glue import GlueRationalizer
+                print(f"\n=== Step 1d: Glue Rationalization ===")
+                from src.rationalizers import run_glue_rationalization
                 
-                rationalizer = GlueRationalizer(
-                    config_path=str(config_file),
-                    llm=llm if not dry_run else None,
-                    dry_run=dry_run
+                run_glue_rationalization(
+                    config=config,
+                    outdir=rationalized_outdir,
+                    llm=llm,
+                    dry_run=dry_run,
+                    config_path=str(config_file)
                 )
-                rationalizer.run(str(rationalized_outdir))
             
             print(f"\n{'='*60}")
             print(f"✓ STEP 1 COMPLETE")
             print(f"  Rationalized files saved to: {rationalized_outdir}")
             print(f"{'='*60}")
         
-        # === STEP 2: CDM GENERATION ===
+        # === STEP 2: IDENTIFY FOUNDATIONAL CDM MODE ===
         if 2 in steps_to_run:
             print(f"\n{'='*60}")
-            print(f"STEP 2: CDM GENERATION")
+            print(f"STEP 2: IDENTIFY FOUNDATIONAL CDM GENERATION MODE")
             print(f"{'='*60}")
             
-            cdm_outdir = base_outdir / "cdm"
-            cdm_outdir.mkdir(parents=True, exist_ok=True)
+            print(f"\n   Select CDM generation mode:")
+            print(f"   ─────────────────────────────────────────────────")
+            print(f"   [S] Standards  - FHIR/NCPDP structures prioritized")
+            print(f"   [H] Hybrid     - Standards + business files equally weighted")
+            print(f"   [A] AI Decide  - Let AI analyze sources and recommend")
+            print(f"   [C] Cancel     - Skip mode selection")
             
-            if dry_run:
-                prompts_dir = cdm_outdir / "prompts"
-                prompts_dir.mkdir(parents=True, exist_ok=True)
-                print(f"\n🔍 DRY RUN MODE - Prompts will be saved to: {prompts_dir}")
+            while True:
+                choice = input("\nSelection [S]: ").strip().upper()
+                if choice == '' or choice == 'S':
+                    cdm_generation_mode = 'standards'
+                    print(f"\n   ✓ Mode selected: STANDARDS")
+                    print(f"     Standards-first approach - FHIR/NCPDP structures prioritized")
+                    break
+                elif choice == 'H':
+                    cdm_generation_mode = 'hybrid'
+                    print(f"\n   ✓ Mode selected: HYBRID")
+                    print(f"     Balanced approach - Standards + internal business files equally weighted")
+                    break
+                elif choice == 'A':
+                    print(f"\n   🤖 AI Determination selected...")
+                    print(f"   ⚠️  AI mode determination not yet implemented.")
+                    print(f"   Defaulting to HYBRID mode.")
+                    cdm_generation_mode = 'hybrid'
+                    # Future: call id_foundational_model here
+                    # from src.steps.id_foundational_model import determine_generation_mode
+                    # result = determine_generation_mode(config, llm, rationalized_dir)
+                    # Display result and reasoning, prompt for accept/override
+                    break
+                elif choice == 'C':
+                    cdm_generation_mode = None
+                    print(f"\n   ○ Mode selection cancelled")
+                    print(f"     Step 3 will use default HYBRID mode if run")
+                    break
+                else:
+                    print("   Invalid choice. Please enter S, H, A, or C.")
             
-            # Prompt for which Step 2 substeps to run
-            print("\nStep 2 consists of multiple substeps:")
-            print("  2a: FHIR Foundation - Create canonical model from FHIR")
-            print("  2b: NCPDP Refinement - Add NCPDP crosswalk & gap analysis")
-            print("  2c: Guardrails Refinement - Add Guardrails crosswalk & gap analysis")
-            print("  2d: Glue Refinement - Add Glue crosswalk & gap analysis")
-            print("  2e: Other Files & Final Refinement - Naming standards & validation")
-            
-            run_2a = prompt_user("\nRun Step 2a (FHIR Foundation)?", default="Y")
-            run_2b = prompt_user("Run Step 2b (NCPDP Refinement)?", default="N")
-            run_2c = prompt_user("Run Step 2c (Guardrails Refinement)?", default="N")
-            run_2d = prompt_user("Run Step 2d (Glue Refinement)?", default="N")
-            run_2e = prompt_user("Run Step 2e (Other Files & Final)?", default="N")
-            
-            if not any([run_2a, run_2b, run_2c, run_2d, run_2e]):
-                print("  ⚠️  No Step 2 substeps selected, skipping Step 2")
-            else:
-                rationalized_outdir = base_outdir / "rationalized"
-                
-                # Find rationalized FHIR from Step 1 (needed for 2a)
-                if run_2a:
-                    if not rationalized_outdir.exists():
-                        print("  ❌ ERROR: Step 1 output not found. Run Step 1a first.")
-                        sys.exit(1)
-                    
-                    fhir_files = sorted(rationalized_outdir.glob("rationalized_fhir_*.json"))
-                    if not fhir_files:
-                        print("  ❌ ERROR: No rationalized FHIR file found. Run Step 1a first.")
-                        sys.exit(1)
-                    
-                    latest_fhir = fhir_files[-1]
-                    print(f"  📁 Using rationalized FHIR: {latest_fhir.name}")
-                
-                # Step 2a: FHIR Foundation
-                if run_2a:
-                    print(f"\n=== Step 2a: FHIR Foundation CDM ===")
-                    from src.steps.step2a_fhir_foundation import run_step2a
-                    
-                    run_step2a(
-                        config=config,
-                        rationalized_fhir_file=latest_fhir,
-                        outdir=cdm_outdir,
-                        llm=llm if not dry_run else None,
-                        dry_run=dry_run
-                    )
-                
-                # Step 2b: NCPDP Refinement
-                if run_2b:
-                    print(f"\n=== Step 2b: NCPDP Refinement ===")
-                    
-                    # Find most recent foundation CDM from Step 2a
-                    foundation_files = sorted(cdm_outdir.glob("foundation_cdm_*.json"))
-                    if not foundation_files:
-                        print("  ❌ ERROR: No foundation CDM found. Run Step 2a first.")
-                        sys.exit(1)
-                    
-                    latest_foundation = foundation_files[-1]
-                    print(f"  📁 Using foundation CDM: {latest_foundation.name}")
-                    
-                    from src.steps.step2b_ncpdp_refinement import run_step2b
-                    
-                    run_step2b(
-                        config=config,
-                        foundation_cdm_file=latest_foundation,
-                        outdir=cdm_outdir,
-                        llm=llm if not dry_run else None,
-                        dry_run=dry_run
-                    )
-                
-                # Step 2c: Guardrails Refinement
-                if run_2c:
-                    print(f"\n=== Step 2c: Guardrails Refinement ===")
-                    
-                    # Find most recent enhanced CDM from Step 2b (or foundation from 2a if 2b not run)
-                    enhanced_files = sorted(cdm_outdir.glob("enhanced_cdm_ncpdp_*.json"))
-                    if enhanced_files:
-                        latest_enhanced = enhanced_files[-1]
-                        print(f"  📁 Using enhanced CDM from Step 2b: {latest_enhanced.name}")
-                    else:
-                        # Fall back to foundation CDM if 2b wasn't run
-                        foundation_files = sorted(cdm_outdir.glob("foundation_cdm_*.json"))
-                        if not foundation_files:
-                            print("  ❌ ERROR: No foundation or enhanced CDM found. Run Step 2a or 2b first.")
-                            sys.exit(1)
-                        latest_enhanced = foundation_files[-1]
-                        print(f"  📁 Using foundation CDM (2b not run): {latest_enhanced.name}")
-                    
-                    from src.steps.step2c_guardrails_refinement import run_step2c
-                    
-                    run_step2c(
-                        config=config,
-                        enhanced_cdm_file=latest_enhanced,
-                        outdir=cdm_outdir,
-                        llm=llm if not dry_run else None,
-                        dry_run=dry_run
-                    )
-                
-                # Step 2d: Glue Refinement
-                if run_2d:
-                    print(f"\n=== Step 2d: Glue Refinement ===")
-                    print("Step 2d not yet implemented")
-                
-                # Step 2e: Final Refinement
-                if run_2e:
-                    print(f"\n=== Step 2e: Final Refinement ===")
-                    print("Step 2e not yet implemented")
-                
-                print(f"\n{'='*60}")
-                print(f"✓ STEP 2 COMPLETE")
-                print(f"  CDM files saved to: {cdm_outdir}")
-                print(f"{'='*60}")
+            print(f"\n{'='*60}")
+            print(f"✓ STEP 2 COMPLETE")
+            print(f"  CDM Generation Mode: {cdm_generation_mode or 'not set (will use hybrid)'}")
+            print(f"{'='*60}")
         
-        # === STEP 3: BUILD CDM ARTIFACTS ===
+        # === STEP 3: BUILD FOUNDATIONAL CDM ===
         if 3 in steps_to_run:
             print(f"\n{'='*60}")
-            print(f"STEP 3: BUILD CDM ARTIFACTS")
+            print(f"STEP 3: BUILD FOUNDATIONAL CDM")
             print(f"{'='*60}")
+            
+            # Use generation mode from Step 2, default to hybrid
+            mode = cdm_generation_mode or 'hybrid'
+            print(f"   Generation Mode: {mode.upper()}")
             
             cdm_outdir = base_outdir / "cdm"
             cdm_outdir.mkdir(parents=True, exist_ok=True)
@@ -411,7 +347,10 @@ Example:
                 print(f"\n🔍 DRY RUN MODE - Prompts will be saved to: {cdm_outdir / 'prompts'}")
             
             # Step 3a: Build Foundational CDM
-            print(f"\n=== Step 3a: Build Foundational CDM ===")
+            # Future: mode will drive prompt selection
+            # - 'standards': use standards-first prompt
+            # - 'hybrid': use current balanced prompt
+            print(f"\n=== Step 3a: Build Foundational CDM ({mode}) ===")
             from src.cdm_builder.build_foundational_cdm import run_step3a
             
             rationalized_dir = base_outdir / "rationalized"
@@ -424,48 +363,173 @@ Example:
                 rationalized_dir=rationalized_dir
             )
             
-            # Steps 3b/3c only run if CDM was generated (not dry run)
-            if cdm:
-                # Step 3b: Generate DDL
-                print(f"\n=== Step 3b: Generate SQL DDL ===")
-                from src.cdm_builder.generate_ddl import DDLGenerator
-                
-                generator = DDLGenerator(dialect="sqlserver", schema="dbo", catalog="CDM")
-                ddl = generator.generate(cdm)
-                
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                domain_safe = config.cdm.domain.lower().replace(' ', '_')
-                ddl_file = cdm_outdir / f"ddl_{domain_safe}_{timestamp}.sql"
-                
-                with open(ddl_file, 'w', encoding='utf-8') as f:
-                    f.write(ddl)
-                
-                entity_count = len(cdm.get("entities", []))
-                print(f"   ✅ DDL generated: {entity_count} tables")
-                print(f"   📄 Saved to: {ddl_file}")
-                
-                # Step 3c: Generate LucidChart CSV
-                print(f"\n=== Step 3c: Generate LucidChart CSV ===")
-                from src.cdm_builder.ddl_to_lucidchart import ddl_to_lucidchart
-                
-                lucid_file = cdm_outdir / f"lucidchart_{domain_safe}_{timestamp}.csv"
-                
-                rows = ddl_to_lucidchart(
-                    ddl_file=ddl_file,
-                    output_file=lucid_file,
-                    dialect="sqlserver",
-                    schema="dbo",
-                    catalog="CDM"
-                )
-            
             print(f"\n{'='*60}")
             print(f"✓ STEP 3 COMPLETE")
-            print(f"  CDM artifacts saved to: {cdm_outdir}")
+            print(f"  CDM saved to: {cdm_outdir}")
+            if cdm:
+                print(f"  Note: Run Step 7 to generate DDL and LucidChart artifacts")
             print(f"{'='*60}")
         
-        # === STEP 4-5: FUTURE ===
-        if any(s in steps_to_run for s in [4, 5]):
-            print(f"\nSteps 4-5 not yet implemented.")
+        # === STEP 4: REFINEMENT - CONSOLIDATION ===
+        if 4 in steps_to_run:
+            print(f"\n{'='*60}")
+            print(f"STEP 4: REFINEMENT - CONSOLIDATION")
+            print(f"{'='*60}")
+            
+            cdm_outdir = base_outdir / "cdm"
+            cdm_outdir.mkdir(parents=True, exist_ok=True)
+            
+            from src.refinement.refine_consolidation import run_consolidation_refinement
+            
+            cdm = run_consolidation_refinement(
+                config=config,
+                cdm_file=None,  # Auto-finds latest
+                outdir=cdm_outdir,
+                llm=llm,
+                dry_run=dry_run
+            )
+            
+            print(f"\n{'='*60}")
+            print(f"✓ STEP 4 COMPLETE")
+            print(f"{'='*60}")
+        
+        # === STEP 5: REFINEMENT - PK/FK VALIDATION ===
+        if 5 in steps_to_run:
+            print(f"\n{'='*60}")
+            print(f"STEP 5: REFINEMENT - PK/FK VALIDATION")
+            print(f"{'='*60}")
+            
+            cdm_outdir = base_outdir / "cdm"
+            cdm_outdir.mkdir(parents=True, exist_ok=True)
+            
+            from src.refinement.refine_pk_fk_validation import run_pk_fk_validation
+            
+            cdm = run_pk_fk_validation(
+                config=config,
+                cdm_file=None,  # Auto-finds latest
+                outdir=cdm_outdir,
+                llm=llm,
+                dry_run=dry_run
+            )
+            
+            print(f"\n{'='*60}")
+            print(f"✓ STEP 5 COMPLETE")
+            print(f"{'='*60}")
+        
+        # === STEP 6: BUILD FULL CDM ===
+        if 6 in steps_to_run:
+            print(f"\n{'='*60}")
+            print(f"STEP 6: BUILD FULL CDM")
+            print(f"{'='*60}")
+            
+            from src.cdm_full.build_full_cdm import (
+                run_build_full_cdm,
+                get_discovered_sources,
+                get_existing_match_files
+            )
+            
+            # Discover sources and existing match files
+            discovered = get_discovered_sources(base_outdir, config.cdm.domain)
+            existing_matches = get_existing_match_files(base_outdir)
+            
+            if not discovered:
+                print(f"   ❌ No rationalized files found for domain '{config.cdm.domain}'")
+            else:
+                source_types = sorted(discovered.keys())
+                
+                # Display discovered sources
+                print(f"\n   {len(source_types)} rationalized files identified:")
+                for st in source_types:
+                    match_status = "✓ match file exists" if st in existing_matches else "○ no match file"
+                    print(f"     • {st}: {discovered[st].name} [{match_status}]")
+                
+                # Prompt: Skip mapping?
+                skip_mapping = False
+                if existing_matches:
+                    skip_mapping = prompt_user(
+                        f"\nSkip mapping and use existing match files ({len(existing_matches)} available)?",
+                        default="N"
+                    )
+                
+                # Prompt: Per-source mapping (if not skipping)
+                sources_to_map = []
+                if not skip_mapping and not dry_run:
+                    print(f"\n   Select sources to map:")
+                    for st in source_types:
+                        existing_note = f" [existing: {existing_matches[st].name}]" if st in existing_matches else ""
+                        default = "N" if st in existing_matches else "Y"
+                        if prompt_user(f"   Map {st}?{existing_note}", default=default):
+                            sources_to_map.append(st)
+                    
+                    if not sources_to_map and not existing_matches:
+                        print(f"   ⚠️  No sources selected and no existing match files")
+                elif not dry_run:
+                    print(f"   Using existing match files, skipping AI mapping")
+                
+                # Prompt: Generate full CDM?
+                generate_cdm = prompt_user("\nGenerate Full CDM?", default="Y")
+                
+                # Prompt: Run gap analysis?
+                run_gap_analysis = False
+                if generate_cdm:
+                    run_gap_analysis = prompt_user("Run gap analysis?", default="Y")
+                
+                # Execute
+                if generate_cdm or sources_to_map or dry_run:
+                    full_cdm = run_build_full_cdm(
+                        config=config,
+                        cdm_file=None,  # Auto-finds latest
+                        outdir=base_outdir,
+                        llm=llm,
+                        dry_run=dry_run,
+                        sources_to_map=sources_to_map if sources_to_map else None,
+                        skip_mapping=skip_mapping,
+                        generate_cdm=generate_cdm,
+                        run_gap_analysis=run_gap_analysis
+                    )
+                else:
+                    print(f"   ○ Step 6 cancelled by user")
+            
+            print(f"\n{'='*60}")
+            print(f"✓ STEP 6 COMPLETE")
+            print(f"{'='*60}")
+            
+            # === POST-PROCESSING ===
+            existing_full_cdm = find_existing_full_cdm(base_outdir, config.cdm.domain)
+            if existing_full_cdm:
+                run_postprocess = prompt_user("\nRun post-processing (CDE Identification)?", default="Y")
+                if run_postprocess:
+                    from src.cdm_full.run_postprocess import interactive_postprocessing
+                    updated_cdm = interactive_postprocessing(
+                        config=config,
+                        outdir=base_outdir,
+                        llm=llm,
+                        dry_run=dry_run
+                    )
+            else:
+                print(f"   ⚠️  No Full CDM available - skipping post-processing")
+        
+        # === STEP 7: GENERATE ARTIFACTS ===
+        if 7 in steps_to_run:
+            print(f"\n{'='*60}")
+            print(f"STEP 7: GENERATE ARTIFACTS")
+            print(f"{'='*60}")
+            
+            from src.artifacts.run_artifacts import interactive_artifact_generation
+            
+            artifacts = interactive_artifact_generation(
+                config=config,
+                outdir=base_outdir
+            )
+            
+            print(f"\n{'='*60}")
+            print(f"✓ STEP 7 COMPLETE")
+            print(f"{'='*60}")
+        
+        # === STEPS 8-9: FUTURE ===
+        if any(s in steps_to_run for s in [8, 9]):
+            future_steps = [s for s in [8, 9] if s in steps_to_run]
+            print(f"\nSteps {future_steps} not yet implemented.")
         
         print(f"\n{'='*60}")
         print("ORCHESTRATION COMPLETE")

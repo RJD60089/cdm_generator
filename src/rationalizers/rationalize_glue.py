@@ -341,3 +341,28 @@ if __name__ == "__main__":
     
     rationalizer = GlueRationalizer(sys.argv[1])
     rationalizer.run(sys.argv[2])
+
+
+# =============================================================================
+# ORCHESTRATOR WRAPPER
+# =============================================================================
+
+def run_glue_rationalization(config, outdir, llm=None, dry_run=False, config_path=None):
+    """
+    Wrapper function for orchestrator compatibility.
+    
+    Args:
+        config: AppConfig instance (unused, for interface consistency)
+        outdir: Output directory path
+        llm: LLM client instance
+        dry_run: If True, save prompts only
+        config_path: Path to config JSON file (required)
+    
+    Returns:
+        Path to output file, or None if dry run
+    """
+    if not config_path:
+        raise ValueError("config_path is required for Glue rationalization")
+    
+    rationalizer = GlueRationalizer(config_path, llm=llm, dry_run=dry_run)
+    return rationalizer.run(str(outdir))

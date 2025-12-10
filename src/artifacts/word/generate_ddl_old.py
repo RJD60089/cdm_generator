@@ -1,15 +1,15 @@
-# src/cdm_builder/generate_ddl.py
+# src/artifacts/generate_ddl.py
 """
 Generate SQL DDL from CDM JSON
 
-Converts a minimal CDM JSON structure into SQL DDL statements.
+Converts a CDM JSON structure into SQL DDL statements.
 Supports multiple SQL dialects (SQL Server, PostgreSQL, MySQL).
 
 Input: CDM JSON with entities, attributes, relationships
 Output: SQL DDL file with CREATE TABLE statements
 
 Usage:
-    python -m src.cdm_builder.generate_ddl cdm_file.json --dialect sqlserver --output output.sql
+    python -m src.artifacts.generate_ddl cdm_file.json --dialect sqlserver --output output.sql
 """
 
 import json
@@ -358,7 +358,39 @@ def generate_ddl(
         output_file.parent.mkdir(parents=True, exist_ok=True)
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(ddl)
-        print(f"DDL saved to: {output_file}")
+        print(f"   ✅ DDL saved: {output_file.name}")
+    
+    return ddl
+
+
+def generate_ddl_from_dict(
+    cdm: Dict[str, Any],
+    output_file: Optional[Path] = None,
+    dialect: str = "sqlserver",
+    schema: str = "dbo",
+    catalog: str = "CDM"
+) -> str:
+    """
+    Generate DDL from CDM dict (in-memory).
+    
+    Args:
+        cdm: CDM dictionary
+        output_file: Optional output path
+        dialect: SQL dialect
+        schema: Database schema name
+        catalog: Database catalog name
+    
+    Returns:
+        DDL string
+    """
+    generator = DDLGenerator(dialect=dialect, schema=schema, catalog=catalog)
+    ddl = generator.generate(cdm)
+    
+    if output_file:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(ddl)
+        print(f"   ✅ DDL saved: {output_file.name}")
     
     return ddl
 

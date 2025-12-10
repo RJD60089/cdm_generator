@@ -2,19 +2,14 @@
 """
 CDM Builder Package
 
-Step 3 modules for building CDM artifacts:
+Step 3 module for building foundational CDM:
 - Step 3a: Build Foundational CDM (AI-generated conceptual model)
-- Step 3b: Generate SQL DDL
-- Step 3c: Generate LucidChart CSV
+
+Note: DDL and LucidChart generation moved to src/artifacts package (Step 7)
 """
 
 from src.cdm_builder.build_foundational_cdm import run_step3a
-from src.cdm_builder.generate_ddl import DDLGenerator, generate_ddl
-from src.cdm_builder.ddl_to_lucidchart import ddl_to_lucidchart
 
 __all__ = [
-    'run_step3a',
-    'DDLGenerator',
-    'generate_ddl', 
-    'ddl_to_lucidchart'
+    'run_step3a'
 ]

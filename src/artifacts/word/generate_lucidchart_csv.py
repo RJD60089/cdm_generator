@@ -1,25 +1,22 @@
-# src/cdm_builder/ddl_to_lucidchart.py
+# src/artifacts/word/generate_lucidchart_csv.py
 """
 Convert SQL DDL to LucidChart ERD Import CSV
 
 Parses SQL DDL (CREATE TABLE statements) and generates a CSV file
 in the format expected by LucidChart for ERD import.
 
-The output format matches the query:
+The output format matches:
 SELECT 'sqlserver' dbms, TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, 
        COLUMN_NAME, ORDINAL_POSITION, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
        CONSTRAINT_TYPE, FK_TABLE_SCHEMA, FK_TABLE_NAME, FK_COLUMN_NAME
 FROM INFORMATION_SCHEMA...
-
-Usage:
-    python -m src.cdm_builder.ddl_to_lucidchart input.sql --output lucidchart.csv
 """
 
 import re
 import csv
-import argparse
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 
 
@@ -101,7 +98,8 @@ class DDLParser:
         """Parse CREATE TABLE statements."""
         
         # Pattern for CREATE TABLE [schema.]table_name (...)
-        pattern = r'CREATE\s+TABLE\s+(?:(\w+)\.)?(\w+)\s*\((.*?)\)\s*;'
+        # Handle quoted identifiers: [name], "name", `name`
+        pattern = r'CREATE\s+TABLE\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?\s*\((.*?)\)\s*;'
         
         for match in re.finditer(pattern, ddl, re.IGNORECASE | re.DOTALL):
             schema = match.group(1) or self.default_schema
@@ -164,8 +162,9 @@ class DDLParser:
     def _parse_column_def(self, col_def: str) -> Optional[Column]:
         """Parse a single column definition."""
         
-        # Pattern: column_name data_type[(length)] [NOT NULL] [NULL] [DEFAULT ...]
-        pattern = r'^(\w+)\s+(\w+)(?:\s*\(([^)]+)\))?(.*)$'
+        # Pattern: [column_name] data_type[(length)] [NOT NULL] [NULL] [DEFAULT ...]
+        # Handle quoted identifiers
+        pattern = r'^\[?(\w+)\]?\s+(\w+)(?:\s*\(([^)]+)\))?(.*)$'
         match = re.match(pattern, col_def.strip(), re.IGNORECASE)
         
         if not match:
@@ -185,11 +184,17 @@ class DDLParser:
             params = [p.strip() for p in type_params.split(',')]
             if data_type in ('VARCHAR', 'CHAR', 'NVARCHAR', 'NCHAR', 'VARBINARY', 'BINARY'):
                 if params[0].upper() != 'MAX':
-                    max_length = int(params[0])
+                    try:
+                        max_length = int(params[0])
+                    except ValueError:
+                        pass
             elif data_type in ('DECIMAL', 'NUMERIC'):
-                precision = int(params[0])
-                if len(params) > 1:
-                    scale = int(params[1])
+                try:
+                    precision = int(params[0])
+                    if len(params) > 1:
+                        scale = int(params[1])
+                except ValueError:
+                    pass
         
         # Check nullability
         nullable = 'NOT NULL' not in modifiers.upper()
@@ -211,10 +216,10 @@ class DDLParser:
         """Parse table-level constraints (PRIMARY KEY, FOREIGN KEY)."""
         
         # PRIMARY KEY constraint
-        pk_pattern = r'(?:CONSTRAINT\s+\w+\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)'
+        pk_pattern = r'(?:CONSTRAINT\s+\[?\w+\]?\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)'
         pk_match = re.search(pk_pattern, constraint_def, re.IGNORECASE)
         if pk_match:
-            pk_cols = [c.strip() for c in pk_match.group(1).split(',')]
+            pk_cols = [c.strip().strip('[]') for c in pk_match.group(1).split(',')]
             table.primary_keys.extend(pk_cols)
             # Mark columns as PK
             for col in table.columns:
@@ -222,13 +227,13 @@ class DDLParser:
                     col.is_pk = True
         
         # FOREIGN KEY constraint
-        fk_pattern = r'(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(?:(\w+)\.)?(\w+)\s*\(([^)]+)\)'
+        fk_pattern = r'(?:CONSTRAINT\s+\[?\w+\]?\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?\s*\(([^)]+)\)'
         fk_match = re.search(fk_pattern, constraint_def, re.IGNORECASE)
         if fk_match:
-            fk_cols = [c.strip() for c in fk_match.group(1).split(',')]
+            fk_cols = [c.strip().strip('[]') for c in fk_match.group(1).split(',')]
             ref_schema = fk_match.group(2) or self.default_schema
             ref_table = fk_match.group(3)
-            ref_cols = [c.strip() for c in fk_match.group(4).split(',')]
+            ref_cols = [c.strip().strip('[]') for c in fk_match.group(4).split(',')]
             
             for fk_col, ref_col in zip(fk_cols, ref_cols):
                 table.foreign_keys.append(ForeignKey(
@@ -242,15 +247,15 @@ class DDLParser:
         """Parse ALTER TABLE statements for foreign keys."""
         
         # Pattern: ALTER TABLE [schema.]table ADD CONSTRAINT ... FOREIGN KEY (...) REFERENCES ...
-        pattern = r'ALTER\s+TABLE\s+(?:(\w+)\.)?(\w+)\s+ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(?:(\w+)\.)?(\w+)\s*\(([^)]+)\)'
+        pattern = r'ALTER\s+TABLE\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?\s+ADD\s+CONSTRAINT\s+\[?\w+\]?\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?\s*\(([^)]+)\)'
         
         for match in re.finditer(pattern, ddl, re.IGNORECASE):
             schema = match.group(1) or self.default_schema
             table_name = match.group(2)
-            fk_cols = [c.strip() for c in match.group(3).split(',')]
+            fk_cols = [c.strip().strip('[]') for c in match.group(3).split(',')]
             ref_schema = match.group(4) or self.default_schema
             ref_table = match.group(5)
-            ref_cols = [c.strip() for c in match.group(6).split(',')]
+            ref_cols = [c.strip().strip('[]') for c in match.group(6).split(',')]
             
             table_key = f"{schema}.{table_name}"
             if table_key in self.tables:
@@ -316,9 +321,6 @@ class LucidChartCSVGenerator:
                     fk_table = fk.ref_table
                     fk_column = fk.ref_column
                 
-                # For columns that are both PK and FK, show as FK (LucidChart limitation)
-                # Or we could output two rows - but typically FK takes precedence for display
-                
                 rows.append({
                     "dbms": self.dialect,
                     "TABLE_CATALOG": self.catalog,
@@ -354,7 +356,7 @@ class LucidChartCSVGenerator:
 
 
 # =============================================================================
-# MAIN FUNCTION
+# MAIN FUNCTIONS
 # =============================================================================
 
 def ddl_to_lucidchart(
@@ -386,8 +388,6 @@ def ddl_to_lucidchart(
     parser = DDLParser(dialect=dialect, default_schema=schema, catalog=catalog)
     tables = parser.parse(ddl)
     
-    print(f"Parsed {len(tables)} tables from DDL")
-    
     # Generate CSV
     generator = LucidChartCSVGenerator(dialect=dialect, catalog=catalog)
     rows = generator.generate(tables)
@@ -395,33 +395,49 @@ def ddl_to_lucidchart(
     # Write CSV
     generator.write_csv(rows, output_file)
     
-    print(f"LucidChart CSV saved to: {output_file}")
-    print(f"  Tables: {len(tables)}")
-    print(f"  Columns: {len(rows)}")
-    
     return rows
 
 
-# =============================================================================
-# CLI
-# =============================================================================
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert SQL DDL to LucidChart CSV")
-    parser.add_argument("ddl_file", help="Path to SQL DDL file")
-    parser.add_argument("--output", "-o", required=True, help="Output CSV file path")
-    parser.add_argument("--dialect", "-d", default="sqlserver",
-                        choices=["sqlserver", "postgresql", "mysql"],
-                        help="SQL dialect (default: sqlserver)")
-    parser.add_argument("--schema", "-s", default="dbo", help="Default schema (default: dbo)")
-    parser.add_argument("--catalog", "-c", default="CDM", help="Catalog name (default: CDM)")
+def generate_lucidchart_files(
+    ddl_path: Path,
+    outdir: Path,
+    domain: str,
+    dialect: str = "sqlserver",
+    schema: str = "dbo"
+) -> Dict[str, Path]:
+    """
+    Generate LucidChart CSV from DDL file.
     
-    args = parser.parse_args()
+    Args:
+        ddl_path: Path to DDL file
+        outdir: Base output directory
+        domain: Domain name (for filenames)
+        dialect: SQL dialect
+        schema: Default schema name
     
-    ddl_to_lucidchart(
-        ddl_file=Path(args.ddl_file),
-        output_file=Path(args.output),
-        dialect=args.dialect,
-        schema=args.schema,
-        catalog=args.catalog
+    Returns:
+        Dict of file type to Path
+    """
+    
+    artifacts_dir = outdir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    domain_safe = domain.lower().replace(' ', '_')
+    
+    outputs = {}
+    
+    # Main LucidChart import file
+    lucidchart_csv = artifacts_dir / f"lucidchart_{domain_safe}_{timestamp}.csv"
+    
+    rows = ddl_to_lucidchart(
+        ddl_file=ddl_path,
+        output_file=lucidchart_csv,
+        dialect=dialect,
+        schema=schema,
+        catalog=f"{domain}_CDM"
     )
+    
+    outputs["lucidchart"] = lucidchart_csv
+    
+    return outputs

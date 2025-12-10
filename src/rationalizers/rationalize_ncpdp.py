@@ -193,7 +193,7 @@ The fields below use abbreviated keys:
 ```
 
 ## YOUR TASK ##
-Review each field and determine if it should be retained for downstream processing to create the CDM for the Plan domain. The purpose of this task is to REDUCE FIELDS THAT ARE CLEARLY NOT RELATED TO THIS DOMAIN to avoid unnecessary processing downstream.
+Review each field and determine if it should be retained for downstream processing to create the CDM for the {self.cdm_domain} domain. The purpose of this task is to REDUCE FIELDS THAT ARE CLEARLY NOT RELATED TO THIS DOMAIN to avoid unnecessary processing downstream.
 
 ## THE APPROACH ##
 It is BETTER to leave a field for downstream processing that will not be used. It is WORSE to remove a field that could possibly be used.
@@ -490,3 +490,51 @@ if __name__ == "__main__":
     
     rationalizer = NCPDPRationalizer(sys.argv[1])
     rationalizer.run(sys.argv[2], sys.argv[3], sys.argv[4])
+
+
+# =============================================================================
+# ORCHESTRATOR WRAPPER
+# =============================================================================
+
+def run_ncpdp_rationalization(config, outdir, llm=None, dry_run=False, config_path=None):
+    """
+    Wrapper function for orchestrator compatibility.
+    
+    Args:
+        config: AppConfig instance (unused - paths loaded from config_path JSON)
+        outdir: Output directory path
+        llm: LLM client instance
+        dry_run: If True, save prompts only
+        config_path: Path to config JSON file (required)
+    
+    Returns:
+        Path to output file, or None if dry run/no files
+    """
+    if not config_path:
+        raise ValueError("config_path is required for NCPDP rationalization")
+    
+    # Load file paths from config JSON directly
+    import json
+    with open(config_path, 'r') as f:
+        config_data = json.load(f)
+    
+    input_files = config_data.get('input_files', {})
+    ncpdp_general_path = input_files.get('ncpdp_general_file')
+    ncpdp_script_path = input_files.get('ncpdp_script_file')
+    
+    # Default paths if standards selected but no file path specified
+    if not ncpdp_general_path and input_files.get('ncpdp_general_standards'):
+        ncpdp_general_path = "input/strd_ncpdp/ncpdp_general_standards.json"
+    if not ncpdp_script_path and input_files.get('ncpdp_script_standards'):
+        ncpdp_script_path = "input/strd_ncpdp/ncpdp_script_standards.json"
+    
+    if not ncpdp_general_path and not ncpdp_script_path:
+        print("  No NCPDP files configured, skipping")
+        return None
+    
+    rationalizer = NCPDPRationalizer(config_path, llm=llm, dry_run=dry_run)
+    return rationalizer.run(
+        ncpdp_general_path or "",
+        ncpdp_script_path or "",
+        str(outdir)
+    )

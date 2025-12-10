@@ -1,10 +1,10 @@
 {
   "cdm": {
     "domain": "",
-    "type": "Core",
+    "type": "",
     "description": "",
     "version": "1.0",
-    "core_dependency": ""
+    "core_dependency": null
   },
   "input_files": {
     "fhir_igs": [],
@@ -12,22 +12,23 @@
     "glue": [],
     "ddl": [],
     "ncpdp_general_standards": [],
-    "ncpdp_script_standards": []
+    "ncpdp_script_standards": [],
+    "naming_standard": []
   },
   "thresholds": {
-    "entity_threshold": 0.6,
-    "attribute_threshold": 0.4
+    "entity_threshold": 60,
+    "attribute_threshold": 40
   },
   "output": {
-    "directory": "output/",
-    "filename": "_CDM.xlsx"
+    "directory": "",
+    "filename": ""
   },
   "metadata": {
-    "generated_at": "",
+    "generated_at": null,
     "ai_analysis": {
       "fhir_assessment": {},
       "ncpdp_assessment": {}
     },
-    "generator_version": "2.0"
+    "generator_version": "2.1"
   }
 }

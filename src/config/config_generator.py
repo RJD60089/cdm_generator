@@ -1,5 +1,5 @@
 """
-Config Generator for CDM Creation Application - Version 2.1
+Config Generator for CDM Creation Application - Version 2.2
 
 Completes chatbot-filled config templates by:
 1. Reading partial config from chatbot
@@ -17,6 +17,7 @@ Features:
 - Timestamped outputs: config_plan_20251121_232439.json
 - timeout=1800, encoding='utf-8', list/dict NCPDP handling
 - NEW in 2.1: Two-pass FHIR analysis to capture referenced resources
+- NEW in 2.2: AI-based FHIR filename correction for missing files
 
 Usage:
     python src/config/config_generator.py input/business/cdm_plan/config/config_plan.json
@@ -46,11 +47,164 @@ class ConfigGenerator:
         self.input_dir = self.project_root / "input"
         self.standards_fhir_ig = self.input_dir / "strd_fhir_ig"
         self.standards_ncpdp = self.input_dir / "strd_ncpdp"
+        self._fhir_file_list_cache = None  # Cache for FHIR file list
+    
+    # =========================================================================
+    # FHIR Filename Correction Methods (NEW in v2.2)
+    # =========================================================================
+    
+    def _load_fhir_file_list(self) -> List[str]:
+        """Load the list of available FHIR filenames from fhir_file_list.txt."""
+        if self._fhir_file_list_cache is not None:
+            return self._fhir_file_list_cache
+        
+        file_list_path = self.standards_fhir_ig / "fhir_file_list.txt"
+        
+        if not file_list_path.exists():
+            print(f"   ⚠️  fhir_file_list.txt not found at {file_list_path}")
+            print(f"   ℹ️  Generate with: Get-ChildItem -Path \"input\\strd_fhir_ig\" -Recurse -Filter \"*.json\" | Select-Object -ExpandProperty Name | Sort-Object -Unique | Out-File -FilePath \"input\\strd_fhir_ig\\fhir_file_list.txt\"")
+            self._fhir_file_list_cache = []
+            return []
+        
+        try:
+            with open(file_list_path, 'r', encoding='utf-8') as f:
+                filenames = [line.strip() for line in f.readlines() if line.strip()]
+            self._fhir_file_list_cache = filenames
+            return filenames
+        except Exception as e:
+            print(f"   ⚠️  Error reading fhir_file_list.txt: {e}")
+            self._fhir_file_list_cache = []
+            return []
+    
+    def _correct_fhir_filename(self, missing_filename: str, resource_name: str, file_type: str) -> Optional[str]:
+        """DEPRECATED - use _correct_missing_fhir_files_batch instead."""
+        pass
+    
+    def _correct_missing_fhir_files_batch(self, missing_files: List[Dict]) -> Dict[str, str]:
+        """Batch correct all missing FHIR filenames in a single AI call.
+        
+        Args:
+            missing_files: List of dicts with 'filename', 'resource_name', 'file_type'
+            
+        Returns:
+            Dict mapping original filename -> corrected filename (only for successful matches)
+        """
+        if not missing_files:
+            return {}
+            
+        available_files = self._load_fhir_file_list()
+        if not available_files:
+            return {}
+        
+        # Format missing files for prompt
+        missing_list = "\n".join([
+            f"  - {f['filename']} (resource: {f['resource_name']}, type: {f['file_type']})"
+            for f in missing_files
+        ])
+        
+        prompt = f"""Match these missing FHIR filenames to correct actual filenames.
+
+MISSING FILES:
+{missing_list}
+
+AVAILABLE FILES:
+{chr(10).join(available_files)}
+
+COMMON FILENAME MISMATCHES - CHECK ALL:
+
+1. CASE: File type prefix is lowercase
+   CodeSystem-xxx → codesystem-xxx
+   ValueSet-xxx → valueset-xxx
+   StructureDefinition-xxx → structuredefinition-xxx
+
+2. HYPHENS REMOVED from compound words (AFTER the prefix):
+   insurance-plan-type → insuranceplan-type
+   coverage-type → coveragetype
+   benefit-category → benefitcategory
+
+3. "ex-" PREFIX for example/extensible code systems:
+   benefit-category → ex-benefitcategory
+   diagnosis-type → ex-diagnosistype
+   payee-type → ex-payeetype
+
+4. COMBINED PATTERNS (most common):
+   CodeSystem-insurance-plan-type.json → codesystem-insuranceplan-type.json
+   ValueSet-benefit-category.json → valueset-ex-benefitcategory.json
+
+Return a JSON object mapping each missing filename to its corrected filename.
+Use NO_MATCH if no reasonable match exists.
+
+Example response:
+{{
+  "CodeSystem-insurance-plan-type.json": "codesystem-insuranceplan-type.json",
+  "ValueSet-benefit-qualifier.json": "NO_MATCH"
+}}
+
+Return ONLY valid JSON:"""
+
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response_text, _ = self.llm_client.chat(messages)
+            
+            # Parse response
+            response_text = response_text.strip()
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            
+            corrections = json.loads(response_text)
+            
+            # Validate corrections exist in available files
+            available_set = set(available_files)
+            validated = {}
+            for original, corrected in corrections.items():
+                if corrected != "NO_MATCH" and corrected in available_set:
+                    validated[original] = corrected
+            
+            return validated
+            
+        except Exception as e:
+            print(f"      ⚠️  Batch filename correction error: {e}")
+            return {}
+    
+    def _correct_missing_fhir_files(self, fhir_resources: Dict) -> Tuple[Dict, List[str]]:
+        """Attempt to correct missing FHIR filenames using single batch AI call."""
+        
+        # First pass: identify all missing files
+        missing_files = []
+        for resource in fhir_resources.get('fhir_igs', []):
+            filename = resource['filename']
+            matches = self._find_exact_file(self.standards_fhir_ig, filename)
+            if not matches:
+                missing_files.append({
+                    'filename': filename,
+                    'resource_name': resource['resource_name'],
+                    'file_type': resource['file_type']
+                })
+        
+        if not missing_files:
+            return fhir_resources, []
+        
+        # Single batch call for all missing files
+        print(f"      🔍 Attempting to correct {len(missing_files)} missing filename(s)...")
+        corrections_map = self._correct_missing_fhir_files_batch(missing_files)
+        
+        # Apply corrections
+        corrections = []
+        for resource in fhir_resources.get('fhir_igs', []):
+            original = resource['filename']
+            if original in corrections_map:
+                corrected = corrections_map[original]
+                corrections.append(f"{original} → {corrected}")
+                resource['filename'] = corrected
+        
+        return fhir_resources, corrections
         
     def load_partial_config(self, filepath: str) -> Dict:
         """Load chatbot-filled partial config."""
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             
             # Validate required fields
@@ -93,7 +247,7 @@ class ConfigGenerator:
         
         if timestamped_configs:
             try:
-                with open(timestamped_configs[0], 'r') as f:
+                with open(timestamped_configs[0], 'r', encoding='utf-8') as f:
                     print(f"   ℹ️  Loading from: {timestamped_configs[0].name}")
                     return json.load(f)
             except Exception as e:
@@ -517,86 +671,118 @@ For each selected StructureDefinition above:
 
 # CRITICAL Rules for Reference Analysis
 
-1. **Include Referenced Resource IF:**
-   a. It contains identity/classification data for entities in THIS CDM
-   b. Business attributes (carrier name, sponsor address, organization phone) would be UNMAPPED without it
+1. **FIRST: Extract Exclusions from CDM Description**
+   Before analyzing any references, identify ALL exclusions stated in the CDM description.
+   Look for phrases like:
+   - "Explicitly excludes:"
+   - "Exclude all..."
+   - "Does not include..."
+   - "...belongs to [X] CDM"
+   - "Relies on other CDMs for..."
+   
+   These exclusions are ABSOLUTE - no referenced resource that falls into an excluded category may be added.
+
+2. **Include Referenced Resource IF:**
+   a. It contains identity/classification data for entities WITHIN THIS CDM's stated scope
+   b. Business attributes would be UNMAPPED without it
    c. The reference is to a resource that DEFINES entities, not just links to them
+   d. It does NOT fall into any category listed in the CDM description's exclusions
    
-   Examples that SHOULD be included:
-   - InsurancePlan.ownedBy → Reference(Organization) → Organization has carrier/payer identity
-   - InsurancePlan.administeredBy → Reference(Organization) → Organization has admin details
-   - Contract.subject → Reference(Organization) → Organization has party details
-   - ExplanationOfBenefit.insurer → Reference(Organization) → payer identity
+3. **Do NOT Include Referenced Resource IF:**
+   a. It falls into ANY exclusion category from the CDM description
+   b. It represents a domain the CDM description says it "relies on" or "depends on" another CDM for
+   c. The reference is transactional/operational, not definitional
+   d. Including it would expand scope beyond THIS CDM's stated purpose
+   e. For Functional CDMs: it belongs to the Core CDM this functional CDM depends on
 
-2. **Do NOT Include Referenced Resource IF:**
-   a. It represents a DIFFERENT CDM domain entirely (e.g., Patient, Practitioner, Medication)
-   b. The reference is transactional/operational, not definitional
-   c. Including it would significantly expand scope beyond THIS CDM's purpose
+4. **Applying Exclusions - Examples:**
    
-   Examples that should NOT be included:
-   - InsurancePlan.coverage.benefit → DO NOT add separate Benefit resource (that's Benefit CDM)
-   - Coverage.beneficiary → Reference(Patient) → Patient is separate CDM
-   - Claim.provider → Reference(Practitioner) → Practitioner is separate CDM
+   IF CDM description says "Explicitly excludes: plan identity and hierarchy"
+   THEN: Organization (payer/carrier identity), InsurancePlan structure → EXCLUDE
+   
+   IF CDM description says "Explicitly excludes: member eligibility"
+   THEN: Patient, RelatedPerson, Coverage.beneficiary → EXCLUDE
+   
+   IF CDM description says "Explicitly excludes: drug/formulary definitions"
+   THEN: MedicationKnowledge, FormularyItem → EXCLUDE
+   
+   IF CDM description says "Explicitly excludes: claims or encounter structures"
+   THEN: Claim, Encounter, ExplanationOfBenefit → EXCLUDE
 
-3. **Organization Resource - Special Handling:**
-   a. Organization is frequently referenced by Plan, Contract, Coverage resources
-   b. It contains: name, identifier, telecom (phone), address, type, partOf
-   c. For Plan/Benefit CDM: Organization is USUALLY REQUIRED for carrier/sponsor/payer identity
-   d. For other CDMs: Evaluate based on whether payer/organization identity is IN SCOPE
+5. **Core vs Functional CDM Handling:**
+   - Core CDMs define foundational entities (Plan, Drug, Eligibility)
+   - Functional CDMs operate ON core entities (Benefit operates on Plan)
+   - If this is a Functional CDM with core_dependency, resources belonging to that Core CDM are OUT OF SCOPE
+
+6. **Reference Analysis Process:**
+   For each reference found in primary resources:
+   a. Identify what domain/category the referenced resource belongs to
+   b. Check if that category appears in CDM description exclusions
+   c. If excluded → include: false with reasoning citing the exclusion
+   d. If not excluded → evaluate if it contains critical definitional data for THIS CDM
 
 # Output Format
 
 Respond with ONLY valid JSON:
 
 {{
+  "exclusions_identified": [
+    "plan identity and hierarchy",
+    "member eligibility", 
+    "drug/formulary definitions"
+  ],
   "referenced_resources_analysis": [
+    {{
+      "source_resource": "Coverage",
+      "reference_element": "beneficiary",
+      "referenced_resource": "Patient",
+      "include": false,
+      "exclusion_match": "member eligibility",
+      "reasoning": "CDM description explicitly excludes member eligibility - Patient belongs to Eligibility CDM"
+    }},
     {{
       "source_resource": "InsurancePlan",
       "reference_element": "ownedBy",
       "referenced_resource": "Organization",
-      "include": true,
-      "reasoning": "Organization contains carrier identity (name, address, phone) needed for Plan CDM"
+      "include": false,
+      "exclusion_match": "plan identity and hierarchy",
+      "reasoning": "CDM description explicitly excludes plan identity - Organization (payer/carrier) belongs to Plan CDM"
     }},
     {{
-      "source_resource": "InsurancePlan", 
-      "reference_element": "coverage.benefit",
-      "referenced_resource": "Benefit",
-      "include": false,
-      "reasoning": "Benefit details belong in separate Benefit/Formulary CDM, not Plan identity CDM"
+      "source_resource": "SomeResource",
+      "reference_element": "someElement",
+      "referenced_resource": "SomeReference",
+      "include": true,
+      "exclusion_match": null,
+      "reasoning": "Contains [X] data within this CDM's scope, not excluded by description"
     }}
   ],
   "additional_fhir_igs": [
     {{
-      "filename": "StructureDefinition-Organization.json",
-      "resource_name": "Organization",
+      "filename": "structuredefinition-example.json",
+      "resource_name": "Example",
       "file_type": "StructureDefinition",
       "ig_source": "FHIR R4 Base",
       "priority": 1,
-      "reasoning": "Referenced by InsurancePlan.ownedBy/administeredBy. Contains carrier/payer identity data (name, address, telecom) needed for Plan CDM."
-    }},
-    {{
-      "filename": "ValueSet-organization-type.json",
-      "resource_name": "OrganizationType",
-      "file_type": "ValueSet",
-      "ig_source": "FHIR R4 Base",
-      "priority": 1,
-      "reasoning": "Defines organization classification (payer, provider, etc.) for Organization.type"
+      "reasoning": "Referenced by [X]. Contains [Y] data within CDM scope. Not excluded by description."
     }}
   ],
   "pass2_assessment": {{
     "references_analyzed": 5,
-    "resources_added": 2,
+    "resources_added": 1,
+    "exclusions_applied": 3,
     "confidence": "high | medium | low",
-    "notes": "Brief summary of reference analysis for {cdm['domain']} CDM"
+    "notes": "Summary of reference analysis. X references excluded per CDM description."
   }}
 }}
 
 # Critical Requirements
+- FIRST extract and list all exclusions from CDM description before analyzing
 - Return ONLY valid JSON, no markdown or code blocks
-- Use exact FHIR R4/IG standard filenames
-- Only add resources that contain CRITICAL data for THIS CDM
-- Provide clear reasoning for include/exclude decisions
-- Empty additional_fhir_igs array is valid if no critical references found
+- Use exact FHIR R4/IG standard filenames (lowercase)
+- Every exclusion decision must cite which exclusion phrase it matches
+- Empty additional_fhir_igs array is EXPECTED if all references fall into exclusions
+- The CDM description is the AUTHORITATIVE source for scope decisions
 
 Respond with JSON only:"""
     
@@ -641,6 +827,22 @@ Respond with JSON only:"""
                     warnings.append(f"⚠️  {source.capitalize()}: File not found: {filepath}")
             
             print(f"   {source.capitalize()}: {found}/{len(files)} files found (from {source_label})")
+        
+        # Check for missing FHIR files and attempt AI-based correction
+        missing_fhir = []
+        for resource in fhir_resources.get('fhir_igs', []):
+            if not self._find_exact_file(self.standards_fhir_ig, resource['filename']):
+                missing_fhir.append(resource['filename'])
+        
+        if missing_fhir:
+            print(f"\n   🔍 Found {len(missing_fhir)} missing FHIR file(s). Attempting AI correction...")
+            fhir_resources, corrections = self._correct_missing_fhir_files(fhir_resources)
+            if corrections:
+                print(f"   ✅ Corrected {len(corrections)} filename(s):")
+                for c in corrections:
+                    print(f"      • {c}")
+            else:
+                print(f"   ⚠️  No corrections found")
         
         # Match FHIR/IG resources
         print(f"\n   FHIR/IG Resources:")
@@ -794,7 +996,7 @@ Respond with JSON only:"""
                     "fhir_assessment": fhir_resources.get('domain_assessment', {}),
                     "ncpdp_assessment": ncpdp_resources.get('domain_assessment', {})
                 },
-                "generator_version": "2.1"
+                "generator_version": "2.2"
             }
         }
         
@@ -816,8 +1018,8 @@ Respond with JSON only:"""
         filename = f"{base_name}_{timestamp}.json"
         filepath = output_dir / filename
         
-        with open(filepath, 'w') as f:
-            json.dump(config, f, indent=2)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
         
         return filepath
     
@@ -828,18 +1030,20 @@ Respond with JSON only:"""
     def run(self, partial_config_file: str):
         """Execute full config completion workflow."""
         try:
-            print("\n=== CDM Configuration Generator v2.1 ===\n")
+            print("\n=== CDM Configuration Generator v2.2 ===\n")
             
-            # Step 1: Load partial config
-            print(f"📄 Loading partial config: {partial_config_file}")
-            partial_config = self.load_partial_config(partial_config_file)
+            # Step 1: Load config - prefer existing timestamped config over partial
+            existing_config = self.load_existing_config(partial_config_file)
+            
+            if existing_config:
+                print(f"   ℹ️  Using existing timestamped config as base")
+                partial_config = existing_config
+            else:
+                print(f"📄 Loading partial config: {partial_config_file}")
+                partial_config = self.load_partial_config(partial_config_file)
+            
             print(f"   Domain: {partial_config['cdm']['domain']}")
             print(f"   Type: {partial_config['cdm']['type']}")
-            
-            # Check for existing config
-            existing_config = self.load_existing_config(partial_config_file)
-            if existing_config:
-                print(f"   ℹ️  Found existing config - can reuse skipped sections")
             
             # Step 2: Prompt for thresholds
             thresholds = self.prompt_thresholds(partial_config)
@@ -879,10 +1083,10 @@ Respond with JSON only:"""
                     print(f"   Pass 2 Resources Added: {fhir_assessment.get('pass2_resources_added')}")
             else:
                 print("\n⏭️  Skipping FHIR analysis")
-                if existing_config and 'fhir_igs' in existing_config.get('input_files', {}):
+                if 'fhir_igs' in partial_config.get('input_files', {}):
                     fhir_resources = {
-                        'fhir_igs': existing_config['input_files']['fhir_igs'],
-                        'domain_assessment': existing_config.get('metadata', {}).get('ai_analysis', {}).get('fhir_assessment', {})
+                        'fhir_igs': partial_config['input_files']['fhir_igs'],
+                        'domain_assessment': partial_config.get('metadata', {}).get('ai_analysis', {}).get('fhir_assessment', {})
                     }
                     print(f"   ℹ️  Using {len(fhir_resources['fhir_igs'])} FHIR files from existing config")
                 else:
@@ -910,11 +1114,11 @@ Respond with JSON only:"""
                 print(f"   Confidence: {ncpdp_assessment.get('confidence', 'unknown')}")
             else:
                 print("\n⏭️  Skipping NCPDP analysis")
-                if existing_config and 'ncpdp_general_standards' in existing_config.get('input_files', {}):
+                if 'ncpdp_general_standards' in partial_config.get('input_files', {}):
                     ncpdp_resources = {
-                        'ncpdp_general_standards': existing_config['input_files']['ncpdp_general_standards'],
-                        'ncpdp_script_standards': existing_config['input_files']['ncpdp_script_standards'],
-                        'domain_assessment': existing_config.get('metadata', {}).get('ai_analysis', {}).get('ncpdp_assessment', {})
+                        'ncpdp_general_standards': partial_config['input_files']['ncpdp_general_standards'],
+                        'ncpdp_script_standards': partial_config['input_files'].get('ncpdp_script_standards', []),
+                        'domain_assessment': partial_config.get('metadata', {}).get('ai_analysis', {}).get('ncpdp_assessment', {})
                     }
                     gen_count = len(ncpdp_resources['ncpdp_general_standards'])
                     script_count = len(ncpdp_resources['ncpdp_script_standards'])

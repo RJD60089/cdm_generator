@@ -146,7 +146,7 @@ def load_config(config_path: str) -> AppConfig:
         raise FileNotFoundError(f"Config file not found: {config_path}")
     
     # Load JSON
-    with open(config_file, 'r') as f:
+    with open(config_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
     
     # Parse into config objects
