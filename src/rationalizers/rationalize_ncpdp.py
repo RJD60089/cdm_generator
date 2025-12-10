@@ -1,6 +1,11 @@
 """
 NCPDP Rationalization Module
 Transforms NCPDP standards file into unified rationalized format
+
+Version 2.0:
+- Improved pruning prompt with balanced keep/remove logic
+- UTF-8 encoding throughout
+- Removal summary in AI output for validation
 """
 
 import json
@@ -22,7 +27,7 @@ class NCPDPRationalizer:
         self.dry_run = dry_run
         self.prompts_dir: Optional[Path] = None
         
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
         self.cdm_domain = self.config.get('cdm', {}).get('domain', '')
@@ -160,7 +165,7 @@ class NCPDPRationalizer:
                            raw_fields: List[Dict[str, Any]]) -> str:
         """Build prompt for AI to identify fields to keep - uses raw NCPDP data"""
         
-        prompt = f"""You are a data architect analyzing NCPDP standard fields for relevance to the CDM domain specified below.
+        prompt = f"""You are a data analyst reviewing the NCPDP standard fields for relevance to the CDM domain specified below.
 
 ## CDM CONTEXT
 
@@ -192,35 +197,31 @@ The fields below use abbreviated keys:
 {json.dumps(raw_fields, indent=2)}
 ```
 
-## YOUR TASK ##
-Review each field and determine if it should be retained for downstream processing to create the CDM for the {self.cdm_domain} domain. The purpose of this task is to REDUCE FIELDS THAT ARE CLEARLY NOT RELATED TO THIS DOMAIN to avoid unnecessary processing downstream.
+## YOUR TASK
 
-## THE APPROACH ##
-It is BETTER to leave a field for downstream processing that will not be used. It is WORSE to remove a field that could possibly be used.
+Review EACH AND EVERY field and determine if it should be retained for downstream processing to create the CDM for the {self.cdm_domain} domain. The purpose of this task is to REDUCE FIELDS THAT ARE CLEARLY NOT RELATED TO THIS DOMAIN to avoid unnecessary processing downstream.
 
-## DIRECTIONTIONS ## 
-KEEP a field if:
+## THE APPROACH
+
+A BEST EFFORT should be made to determine if a field provides CLEAR BUSINESS VALUE to the CDM. However, in the event a determination cannot be made it is better to leave a field for downstream processing that will not be used than drop a field that should be used.
+
+## DIRECTIONS
+
+When determining whether a field provides value to the domain ALWAYS consider the following:
 - ALWAYS consider the Definition of Field, in addition to the Field Code, Name or Format 
-- It could reasonably be used in this domain
-- It relates to identification, dates, or interpretive codes/classifications (used to qualify or interpret another field that is relevant to the current CDM's domain)
-- You are unsure whether it belongs
-- It might be useful for relationships or context
+- Will the field reasonably provide domain business value if included
+- Is it specifically used in identification, dates, or interpretive codes/classifications used to qualify or interpret another field that is relevant to the current CDM's domain
+- Is it clearly useful for relationships or context
 
-## IMPORTANT GUIDANCE ##
-When in doubt, KEEP the field - Err on the side of inclusion. It is better to keep 10 unnecessary fields than to remove 1 necessary one.
+## IMPORTANT GUIDANCE
 
-## INTERPRETATION OF DOMAIN DESCRIPTION ## 
-The Description is provided to give general context about the CDM domain, but it was originally 
-written for selecting standards, not for pruning attributes. For this pruning task, treat the 
-Description as a high-level hint; not a strict set of removal rules.
+Always make the VERY BEST EFFORT to make a determination if a field should be kept. If a decision can absolutely not be made, keep the field.
 
-You MUST NOT remove an attribute solely because the Description mentions that certain topics are 
-handled by other domains. These exclusions should NOT be interpreted as instructions to drop any 
-attribute that uses similar words.
+## INTERPRETATION OF DOMAIN DESCRIPTION
 
-Use the Description ONLY to identify attributes that are clearly and unambiguously outside 
-the structural intent of this domain. The Description should guide you gently, but not 
-override the core KEEP rules (identifiers, dates, statuses, qualifiers, relationship/linkage fields).
+The Description is provided to give general context about the CDM domain, but it was originally written for selecting standards, not for pruning attributes. For this pruning task, treat the Description as a high-level hint; not a strict set of removal rules.
+
+You MUST GIVE VERY CAREFUL CONSIDERATION to removing an attribute solely because the Description mentions that certain topics are handled by other domains. These exclusions should only provide limited guidance to dropping any attribute that uses similar words.
 
 ## OUTPUT FORMAT
 
@@ -230,20 +231,22 @@ Return ONLY valid JSON with the list of field IDs to keep:
 {{
   "entity_name": "{entity_name}",
   "fields_reviewed": {len(raw_fields)},
-  "keep": ["T_001", "T_002", ...]
+  "keep": ["T_001", "T_002", ...],
+  "removed_count": 45,
+  "removal_summary": "Removed fields primarily related to: [brief categories of removed fields]"
 }}
 ```
 
 CRITICAL: 
 - Return ONLY valid JSON (no markdown, no code blocks, no commentary)
 - Use exact field IDs from the "id" values provided
-- When in doubt, KEEP the field
+- Always give careful consideration to business value when determining whether to keep or drop a field
 """
         return prompt
     
     def prune_fields_with_ai(self, entity_name: str, source_detail: str, business_purpose: str,
-                             raw_fields: List[Dict[str, Any]], standard_code: str) -> Tuple[List[Dict[str, Any]], int, int]:
-        """Use AI to prune raw fields, return filtered raw fields"""
+                             raw_fields: List[Dict[str, Any]], standard_code: str) -> Tuple[List[Dict[str, Any]], int, int, str]:
+        """Use AI to prune raw fields, return filtered raw fields and removal summary"""
         
         prompt = self.build_prune_prompt(entity_name, source_detail, business_purpose, raw_fields)
         
@@ -254,19 +257,19 @@ CRITICAL:
                 with open(prompt_file, 'w', encoding='utf-8') as f:
                     f.write(prompt)
                 print(f"    Prompt saved: {prompt_file.name}")
-            return raw_fields, len(raw_fields), 0  # Return all in dry run
+            return raw_fields, len(raw_fields), 0, ""  # Return all in dry run
         
         # No LLM - return all
         if not self.llm:
             print(f"    Warning: No LLM client, skipping prune for {entity_name}")
-            return raw_fields, len(raw_fields), 0
+            return raw_fields, len(raw_fields), 0, ""
         
         print(f"    Pruning {entity_name} ({len(raw_fields)} fields)...")
         
         messages = [
             {
                 "role": "system",
-                "content": "You are a data architect. Return ONLY valid JSON with no markdown, no code blocks, no commentary."
+                "content": "You are a data analyst. Return ONLY valid JSON with no markdown, no code blocks, no commentary."
             },
             {
                 "role": "user", 
@@ -281,67 +284,65 @@ CRITICAL:
             response_clean = response.strip()
             if response_clean.startswith("```"):
                 lines = response_clean.split("\n")
-                response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
+                # Remove first line if it starts with ```
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                # Remove last line if it's just ```
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                response_clean = "\n".join(lines)
             
             result = json.loads(response_clean)
             
             # Get list of field IDs to keep
             keep_ids = set(result.get('keep', []))
+            removal_summary = result.get('removal_summary', '')
             
-            # Debug: Check what AI returned
-            print(f"    AI returned {len(keep_ids)} IDs to keep")
+            # Filter raw fields
+            filtered_fields = [f for f in raw_fields if f.get('id') in keep_ids]
             
-            # Get all field IDs from raw data
-            raw_ids = {f.get('id') for f in raw_fields if f.get('id')}
-            
-            # Check for mismatches
-            missing_in_raw = keep_ids - raw_ids
-            if missing_in_raw:
-                print(f"    WARNING: {len(missing_in_raw)} IDs from AI not found in raw fields: {list(missing_in_raw)[:5]}...")
-            
-            # Filter raw fields by ID
             original_count = len(raw_fields)
-            kept_fields = [f for f in raw_fields if f.get('id') in keep_ids]
-            kept_count = len(kept_fields)
+            kept_count = len(filtered_fields)
             removed_count = original_count - kept_count
             
-            # Debug: Check if filtering worked
-            if kept_count != len(keep_ids):
-                matched_ids = len(keep_ids) - len(missing_in_raw)
-                print(f"    WARNING: AI returned {len(keep_ids)} IDs, but only {kept_count} matched raw fields")
+            print(f"    ✓ Kept {kept_count}/{original_count} fields ({removed_count} removed)")
+            if removal_summary:
+                print(f"      Removal summary: {removal_summary[:100]}...")
             
-            print(f"    ✓ Kept {kept_count}/{original_count} fields")
-            
-            return kept_fields, original_count, removed_count
+            return filtered_fields, original_count, removed_count, removal_summary
             
         except json.JSONDecodeError as e:
-            print(f"    ERROR: Failed to parse AI response: {e}")
-            print(f"    Response preview: {response[:200] if response else 'empty'}...")
-            return raw_fields, len(raw_fields), 0
+            print(f"    Warning: Failed to parse AI prune response: {e}")
+            print(f"    Keeping all fields for {entity_name}")
+            return raw_fields, len(raw_fields), 0, f"Parse error: {str(e)}"
         except Exception as e:
-            print(f"    ERROR: AI pruning failed: {e}")
-            return raw_fields, len(raw_fields), 0
+            print(f"    Warning: AI prune failed for {entity_name}: {e}")
+            return raw_fields, len(raw_fields), 0, f"Error: {str(e)}"
     
     def rationalize_standard(self, standard_code: str, raw_fields: List[Dict[str, Any]], 
-                             standards_map: Dict[str, str]) -> Dict[str, Any]:
-        """Rationalize a single standard: prune first, then transform"""
+                            standards_map: Dict[str, str]) -> Dict[str, Any]:
+        """Rationalize a single NCPDP standard into common entity format"""
         
-        std_info = self.standards_info.get(standard_code, {})
-        std_name = std_info.get('name') or standards_map.get(standard_code, f"Standard_{standard_code}")
+        std_name = standards_map.get(standard_code, standard_code)
+        entity_name = f"NCPDP_{standard_code}"
+        source_file = f"ncpdp_{standard_code.lower()}_standards.json"
         
-        entity_name = std_name.replace(' ', '_').replace('/', '_')
-        source_detail = f"NCPDP {std_name}"
-        business_purpose = std_info.get('reasoning', '')
+        # Build source detail and business purpose from standards_info
+        info = self.standards_info.get(standard_code, {})
+        source_detail = f"Format {standard_code} - {std_name}"
+        business_purpose = info.get('reasoning', f"NCPDP {std_name} data elements for {self.cdm_domain}")
         
-        # Step 1: Prune raw fields with AI
-        kept_fields, original_count, removed_count = self.prune_fields_with_ai(
+        original_count = len(raw_fields)
+        
+        # Prune fields with AI
+        filtered_fields, original_count, removed_count, removal_summary = self.prune_fields_with_ai(
             entity_name, source_detail, business_purpose, raw_fields, standard_code
         )
         
-        # Step 2: Transform kept fields to attributes
+        # Transform remaining fields to attributes
         attributes = []
-        for field in kept_fields:
-            attr = self.transform_field_to_attribute(field, standard_code, f"ncpdp_{standard_code.lower()}_standards.json")
+        for field in filtered_fields:
+            attr = self.transform_field_to_attribute(field, standard_code, source_file)
             attributes.append(attr)
         
         # Build entity in common format
@@ -361,7 +362,8 @@ CRITICAL:
             "technical_context": None,
             "ai_metadata": {
                 "selection_reasoning": business_purpose,
-                "pruning_notes": f"Pruned {removed_count} of {original_count} fields ({len(attributes)} kept)"
+                "pruning_notes": f"Pruned {removed_count} of {original_count} fields ({len(attributes)} kept)",
+                "removal_summary": removal_summary
             },
             "attributes": attributes,
             "source_metadata": {
@@ -472,7 +474,7 @@ CRITICAL:
         
         output_file = output_path / f"rationalized_ncpdp_{domain_safe}_{timestamp}.json"
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(consolidated, f, indent=2)
+            json.dump(consolidated, f, indent=2, ensure_ascii=False)
         
         attr_count = sum(len(e.get('attributes', [])) for e in all_entities)
         print(f"  ✓ Saved: {output_file.name}")
@@ -514,8 +516,7 @@ def run_ncpdp_rationalization(config, outdir, llm=None, dry_run=False, config_pa
         raise ValueError("config_path is required for NCPDP rationalization")
     
     # Load file paths from config JSON directly
-    import json
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config_data = json.load(f)
     
     input_files = config_data.get('input_files', {})

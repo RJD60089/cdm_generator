@@ -138,7 +138,7 @@ def apply_match_files(
                     attr_lineage = {
                         "source_entity": source_entity_name,
                         "source_attribute": source_attr_name,
-                        "source_files": source_attr.get("source_files", []),
+                        "source_files": source_attr.get("source_files_element", []),
                         "mapping_type": attr_mapping.get("mapping_type", "direct"),
                         "confidence": attr_mapping.get("confidence", "medium"),
                         "data_type": source_attr.get("data_type"),

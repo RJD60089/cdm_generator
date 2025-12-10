@@ -258,19 +258,21 @@ Return ONLY valid JSON:"""
     def prompt_thresholds(self, partial_config: Dict) -> Dict[str, float]:
         """Prompt user for threshold values with defaults from template."""
         
-        # Get defaults from template or use hardcoded defaults
+        print("\n📊 Threshold Configuration")
         template_thresholds = partial_config.get('thresholds', {})
-        entity_default = template_thresholds.get('entity_threshold', 60)
-        attribute_default = template_thresholds.get('attribute_threshold', 40)
         
-        print("\n=== Threshold Configuration ===\n")
-        print(f"Current defaults: Entity={entity_default}%, Attribute={attribute_default}%")
-        print("Press Enter to keep defaults, or enter new values.\n")
+        # Get defaults - handle both decimal (0.6) and integer (60) formats
+        entity_raw = template_thresholds.get('entity_threshold', 60)
+        attribute_raw = template_thresholds.get('attribute_threshold', 40)
         
-        entity_input = input(f"Enter Entity Alignment Threshold [{entity_default}]: ").strip()
+        # Convert to display format (integer percentage)
+        entity_default = int(entity_raw * 100) if entity_raw < 1 else int(entity_raw)
+        attribute_default = int(attribute_raw * 100) if attribute_raw < 1 else int(attribute_raw)
+        
+        entity_input = input(f"   Entity threshold % (default {entity_default}): ").strip()
         entity_threshold = int(entity_input) / 100 if entity_input else entity_default / 100
         
-        attribute_input = input(f"Enter Attribute Fit Threshold [{attribute_default}]: ").strip()
+        attribute_input = input(f"   Attribute threshold % (default {attribute_default}): ").strip()
         attribute_threshold = int(attribute_input) / 100 if attribute_input else attribute_default / 100
         
         return {

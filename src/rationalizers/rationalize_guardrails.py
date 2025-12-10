@@ -1,6 +1,12 @@
 """
 Guardrails Rationalization Module
 Rationalizes Guardrails API specification files into unified entities and attributes.
+
+Version 2.0:
+- Iterative file-by-file processing with in-memory accumulation
+- Incremental rationalization (AI merges new file against prior state)
+- Improved prompt with scope filtering and lineage tracking
+- UTF-8 encoding throughout
 """
 
 import json
@@ -18,7 +24,7 @@ class GuardrailsRationalizer:
         self.dry_run = dry_run
         self.prompts_dir: Optional[Path] = None
         
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
         self.cdm_domain = self.config.get('cdm', {}).get('domain', '')
@@ -33,49 +39,74 @@ class GuardrailsRationalizer:
         print(f"  Domain: {self.cdm_domain}")
         print(f"  Guardrails files: {len(self.guardrails_files)}")
     
-    def build_prompt(self) -> str:
-        """Build Guardrails rationalization prompt with CDM description"""
+    def build_prompt(self, gr_file: str, prior_state: Optional[Dict] = None) -> str:
+        """
+        Build Guardrails rationalization prompt for a single file.
         
-        # Convert files to JSON and print tab info
-        gr_json = []
-        print(f"\n  Processing {len(self.guardrails_files)} Guardrails file(s):")
-        for gr_file in self.guardrails_files:
-            content = convert_guardrails_to_json(gr_file)
-            gr_json.append({
-                'filename': Path(gr_file).name,
-                'content': content
-            })
-            # Print file and tab info
-            tabs = list(content.get('sheets', {}).keys())
-            print(f"\n  File: {Path(gr_file).name}")
-            for tab in tabs:
-                print(f"    • {tab}")
+        Args:
+            gr_file: Path to guardrails file to process
+            prior_state: Previously rationalized state (None for first file)
+            
+        Returns:
+            Complete prompt string
+        """
+        # Convert file to JSON
+        content = convert_guardrails_to_json(gr_file)
+        filename = Path(gr_file).name
+        tabs = list(content.get('sheets', {}).keys())
         
-        print(f"\n  Total tabs: {sum(len(g['content'].get('sheets', {})) for g in gr_json)}")
+        print(f"\n  File: {filename}")
+        for tab in tabs:
+            print(f"    - {tab}")
         
         # Build prompt with CDM context
-        prompt = f"""You are a business analyst rationalizing multiple API specifications for a PBM CDM.
+        prompt = f"""You are a business analyst engaged in developing a CDM for a PBM organization.
 
 ## CDM CONTEXT
 
-**Domain:** {self.cdm_domain}
+**CDM Domain:** {self.cdm_domain}
 
-**Description:** {self.cdm_description}
+**CDM Description:** {self.cdm_description}
+
+## SCOPE FILTERING
+
+Use the CDM Description's Includes/Excludes to determine relevance:
+- INCLUDE: Entities/attributes that directly define what's listed in "Includes:"
+- EXCLUDE: Entities/attributes that belong to domains listed in "Excludes:"
+- When uncertain, check if the element's PRIMARY PURPOSE aligns with this CDM
 
 ## YOUR TASK
 
-Analyze the {len(self.guardrails_files)} Guardrails specification files and rationalize them into a unified set of business entities and attributes with complete data governance that aligns with the CDM description above.
+Analyze the provided Guardrail file which is a collection of API interface definitions and data structures. These files will have a varying number of data elements relevant to defining the CDM for given domain. Each and every element needs to be reviewed and a determination made if it is of business value to include in the CDM. It is possible that the entities and data elements represented in the files may be duplicated or have similar but not exact names. When an entity or data element is identified for inclusion into the CDM, it needs to be appropriately integrated into the rationalized output. The guardrail files represent existing uses of data in the organization and it is very important that the lineage from the guardrail file to the rationalized output is defined and retained, along with all metadata and governance in the output.
 
 ## RATIONALIZATION GOALS
 
-1. Identify all unique business entities across all API specifications relevant to this CDM
+1. Identify all unique business entities across all API specifications and data structures relevant to this CDM
 2. Consolidate duplicate or overlapping attributes across different APIs
 3. Resolve conflicts between API versions and specifications
-4. **Preserve business rules, validation requirements, AND data governance metadata**
-5. **Capture calculated field information and API request/response context**
-6. Track source files AND tabs (file::tab format) for each rationalized element
-7. Consider the CDM description when determining relevance and priority
+4. **Important to preserve the lineage from the data entity or element from the guardrail file to the output**
+5. **Preserve business rules, validation requirements, AND data governance metadata**
+6. **Capture calculated field information and API request/response context**
+7. Track source files AND tabs (file::tab format) for each rationalized element
+8. Consider the CDM description when determining relevance and priority
+"""
 
+        # Add incremental rationalization instructions if prior state exists
+        if prior_state:
+            prompt += """
+## INCREMENTAL RATIONALIZATION
+
+A previously rationalized output state is included below. You must:
+1. Treat it as the current rationalized output state
+2. Analyze the NEW guardrails file against this state
+3. For matching entities: merge attributes, append to source_files lists
+4. For new entities: add to rationalized_entities
+5. For duplicate attributes: consolidate, preserve all source lineage
+6. For conflicts: prefer the more complete/specific definition, note in business_context
+7. Return the COMPLETE updated rationalized output (not just changes)
+"""
+
+        prompt += f"""
 ## OUTPUT FORMAT
 
 Return ONLY valid JSON in this structure:
@@ -85,15 +116,15 @@ Return ONLY valid JSON in this structure:
   "domain": "{self.cdm_domain}",
   "rationalized_entities": [
     {{
-      "entity_name": "Plan",
-      "source_api": "Hierarchy API v1.5",
-      "source_files": ["GR_File.xlsx::Hierarchy", "GR_File.xlsx::Plan Setup"],
+      "entity_name": "[SELECTED ENTITY]",
+      "source_api": "[API NAME AND VERSION]",
+      "source_files": ["[FILE.xlsx]::[TAB NAME 1]", "[FILE.xlsx]::[TAB NAME 2]"],
       "description": "...",
       "business_context": "...",
       "attributes": [
         {{
-          "attribute_name": "plan_id",
-          "source_files": ["GR_File.xlsx::Hierarchy"],
+          "attribute_name": "[SELECTED ATTRIBUTE]",
+          "source_files_element": ["[FILE.xlsx]::[TAB NAME]::[ORIGINAL ELEMENT NAME]"],
           "data_type": "string",
           "required": true,
           "allow_null": false,
@@ -113,38 +144,56 @@ Return ONLY valid JSON in this structure:
 }}
 ```
 
-## CRITICAL
+**Note:** This prompt is CDM-agnostic. Interpret `[SELECTED ENTITY]` and `[SELECTED ATTRIBUTE]` as appropriate for the current domain context provided above.
+
+## CRITICAL - MUST DO ALL OF THE FOLLOWING FOR EVERY SELECTED DATA ENTITY OR DATA ELEMENT
 
 - Output ONLY valid JSON (no markdown, no code blocks)
-- Use file::tab format for source tracking (e.g., "File.xlsx::Tab Name")
+- `attribute_name` = your rationalized/cleaned name for the CDM
+- `source_files_element` = EXACT original field name from source (e.g., "File.xlsx::Tab::Dollars" not "File.xlsx::Tab::copay_amount")
+- Use file::tab::element format for complete source lineage tracking
 - Track calculated fields with dependencies
 - Preserve data governance (PII, PHI, classification)
 - Focus on elements relevant to: {self.cdm_description}
 
 ---
-
-## GUARDRAILS SPECIFICATION FILES
-
 """
-        
-        for i, gr_data in enumerate(gr_json, 1):
-            prompt += f"### Guardrails File {i}: {gr_data['filename']}\n\n```json\n{json.dumps(gr_data['content'], indent=2)}\n```\n\n"
-        
-        prompt += """
+
+        # Add prior state if incremental
+        if prior_state:
+            prompt += f"""
+## PREVIOUSLY RATIONALIZED OUTPUT STATE
+
+```json
+{json.dumps(prior_state, indent=2)}
+```
+
+---
+"""
+
+        # Add current guardrails file
+        prompt += f"""
+## GUARDRAILS FILE TO PROCESS
+
+### {filename}
+
+```json
+{json.dumps(content, indent=2)}
+```
+
 ---
 
-Generate the rationalized JSON now.
-"""
+Generate the rationalized JSON now."""
         
         return prompt
     
-    def save_prompt(self, prompt: str, output_dir: Path) -> dict:
+    def save_prompt(self, prompt: str, output_dir: Path, file_index: int) -> dict:
         """Save prompt to file and return stats"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         prompts_dir = output_dir / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)
         
-        output_file = prompts_dir / f"guardrails_rationalization_{timestamp}.txt"
+        output_file = prompts_dir / f"guardrails_rationalization_{file_index:02d}_{timestamp}.txt"
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(prompt)
         
@@ -154,9 +203,101 @@ Generate the rationalized JSON now.
             'tokens_estimate': len(prompt) // 4
         }
     
+    def _parse_ai_response(self, response: str) -> Dict:
+        """Parse AI response, stripping markdown if present."""
+        response_clean = response.strip()
+        if response_clean.startswith("```"):
+            lines = response_clean.split("\n")
+            # Remove first and last lines (```json and ```)
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            response_clean = "\n".join(lines)
+        
+        return json.loads(response_clean)
+    
+    def _call_llm(self, prompt: str) -> Dict:
+        """Call LLM and return parsed response."""
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a business analyst expert. Return ONLY valid JSON with no markdown, no code blocks, no commentary."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        response, token_usage = self.llm.chat(messages)
+        return self._parse_ai_response(response)
+    
+    def _transform_to_common_format(self, rationalized_data: Dict) -> Dict:
+        """Transform AI output to common format for final output."""
+        raw_entities = rationalized_data.get('rationalized_entities', [])
+        entities = []
+        
+        for raw_entity in raw_entities:
+            raw_attrs = raw_entity.get('attributes', [])
+            attributes = []
+            
+            for raw_attr in raw_attrs:
+                attr = {
+                    "attribute_name": raw_attr.get('attribute_name', ''),
+                    "description": raw_attr.get('description', ''),
+                    "data_type": raw_attr.get('data_type', 'string'),
+                    "source_attribute": raw_attr.get('source_files_element', []),  # Preserve lineage
+                    "source_files": raw_attr.get('source_files_element', []),  # For compatibility
+                    "required": raw_attr.get('required', False),
+                    "nullable": raw_attr.get('allow_null', True),
+                    "cardinality": {"min": 1 if raw_attr.get('required', False) else 0, "max": "1"},
+                    "length": None,
+                    "precision": None,
+                    "scale": None,
+                    "default_value": None,
+                    "is_array": False,
+                    "is_nested": False,
+                    "is_pii": raw_attr.get('is_pii', False),
+                    "is_phi": raw_attr.get('is_phi', False),
+                    "data_classification": raw_attr.get('data_classification'),
+                    "business_context": raw_attr.get('business_context'),
+                    "business_rules": raw_attr.get('business_rules'),
+                    "validation_rules": raw_attr.get('validation_rules'),
+                    "is_calculated": raw_attr.get('is_calculated', False),
+                    "calculation_dependency": raw_attr.get('calculation_dependency'),
+                    "source_metadata": {}
+                }
+                attributes.append(attr)
+            
+            entity = {
+                "entity_name": raw_entity.get('entity_name', ''),
+                "description": raw_entity.get('description', ''),
+                "source_type": "Guardrails",
+                "source_info": {
+                    "files": raw_entity.get('source_files', []),
+                    "api": raw_entity.get('source_api'),
+                    "schema": None,
+                    "table": None,
+                    "url": None,
+                    "version": None
+                },
+                "business_context": raw_entity.get('business_context'),
+                "technical_context": None,
+                "ai_metadata": {
+                    "selection_reasoning": None,
+                    "pruning_notes": None
+                },
+                "attributes": attributes,
+                "source_metadata": {}
+            }
+            entities.append(entity)
+        
+        return entities
+    
     def run(self, output_dir: str) -> Optional[str]:
         """
-        Run Guardrails rationalization.
+        Run Guardrails rationalization with iterative file processing.
         
         Args:
             output_dir: Directory to save output files
@@ -171,145 +312,89 @@ Generate the rationalized JSON now.
             print("  No guardrails files configured, skipping")
             return None
         
-        # Build prompt
-        prompt = self.build_prompt()
+        # Initialize rationalized state
+        rationalized_state = None
+        total_files = len(self.guardrails_files)
         
-        # Dry run - save prompt and exit
-        if self.dry_run:
-            self.prompts_dir = output_path / "prompts"
-            self.prompts_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n  Processing {total_files} guardrails file(s) iteratively...")
+        
+        for idx, gr_file in enumerate(self.guardrails_files, 1):
+            print(f"\n  [{idx}/{total_files}] Processing: {Path(gr_file).name}")
             
-            stats = self.save_prompt(prompt, output_path)
-            print(f"  ✓ Prompt saved: {stats['file']}")
-            print(f"    Characters: {stats['characters']:,}")
-            print(f"    Tokens (est): {stats['tokens_estimate']:,}")
+            # Build prompt (with prior state for files 2+)
+            prompt = self.build_prompt(gr_file, prior_state=rationalized_state)
+            
+            # Dry run - save prompts and continue
+            if self.dry_run:
+                self.prompts_dir = output_path / "prompts"
+                self.prompts_dir.mkdir(parents=True, exist_ok=True)
+                
+                stats = self.save_prompt(prompt, output_path, idx)
+                print(f"    ✓ Prompt saved: {Path(stats['file']).name}")
+                print(f"      Characters: {stats['characters']:,}")
+                print(f"      Tokens (est): {stats['tokens_estimate']:,}")
+                
+                # For dry run, create mock state to test incremental prompts
+                if rationalized_state is None:
+                    rationalized_state = {"domain": self.cdm_domain, "rationalized_entities": []}
+                continue
+            
+            # Live mode - call LLM
+            print(f"    Calling LLM...")
+            
+            try:
+                rationalized_state = self._call_llm(prompt)
+                
+                entity_count = len(rationalized_state.get('rationalized_entities', []))
+                attr_count = sum(
+                    len(e.get('attributes', [])) 
+                    for e in rationalized_state.get('rationalized_entities', [])
+                )
+                print(f"    ✓ Rationalized: {entity_count} entities, {attr_count} attributes")
+                
+            except json.JSONDecodeError as e:
+                print(f"    ERROR: Failed to parse LLM response for {Path(gr_file).name}: {e}")
+                raise
+        
+        # Dry run complete
+        if self.dry_run:
+            print(f"\n  ✓ Dry run complete. {total_files} prompts saved.")
             return None
         
-        # Live mode - call LLM
-        print(f"  Calling LLM...")
+        # Transform final state to common format and save
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        domain_safe = self.cdm_domain.replace(' ', '_')
         
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a business analyst expert. Return ONLY valid JSON with no markdown, no code blocks, no commentary."
+        entities = self._transform_to_common_format(rationalized_state)
+        total_attrs = sum(len(e.get('attributes', [])) for e in entities)
+        
+        output = {
+            "rationalization_metadata": {
+                "source_type": "Guardrails",
+                "cdm_domain": self.cdm_domain,
+                "cdm_classification": self.cdm_classification,
+                "rationalization_timestamp": datetime.now().isoformat(),
+                "files_processed": len(self.guardrails_files),
+                "entities_processed": len(entities),
+                "attributes_processed": total_attrs
             },
-            {
-                "role": "user",
-                "content": prompt
+            "entities": entities,
+            "reference_data": {
+                "value_sets": [],
+                "code_systems": []
             }
-        ]
+        }
         
-        response, token_usage = self.llm.chat(messages)
+        output_file = output_path / f"rationalized_guardrails_{domain_safe}_{timestamp}.json"
         
-        # Parse response
-        try:
-            # Strip markdown if present
-            response_clean = response.strip()
-            if response_clean.startswith("```"):
-                lines = response_clean.split("\n")
-                response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
-            
-            rationalized_data = json.loads(response_clean)
-            
-            # Transform AI output to common format
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            domain_safe = self.cdm_domain.replace(' ', '_')
-            
-            # Transform entities to common format
-            raw_entities = rationalized_data.get('rationalized_entities', [])
-            entities = []
-            
-            for raw_entity in raw_entities:
-                # Transform attributes to common format
-                raw_attrs = raw_entity.get('attributes', [])
-                attributes = []
-                
-                for raw_attr in raw_attrs:
-                    attr = {
-                        "attribute_name": raw_attr.get('attribute_name', ''),
-                        "description": raw_attr.get('description', ''),
-                        "data_type": raw_attr.get('data_type', 'string'),
-                        "source_attribute": raw_attr.get('attribute_name', ''),
-                        "source_files": raw_attr.get('source_files', []),
-                        "required": raw_attr.get('required', False),
-                        "nullable": raw_attr.get('allow_null', True),
-                        "cardinality": {"min": 1 if raw_attr.get('required', False) else 0, "max": "1"},
-                        "length": None,
-                        "precision": None,
-                        "scale": None,
-                        "default_value": None,
-                        "is_array": False,
-                        "is_nested": False,
-                        "is_pii": raw_attr.get('is_pii', False),
-                        "is_phi": raw_attr.get('is_phi', False),
-                        "data_classification": raw_attr.get('data_classification'),
-                        "business_context": raw_attr.get('business_context'),
-                        "business_rules": raw_attr.get('business_rules'),
-                        "validation_rules": raw_attr.get('validation_rules'),
-                        "is_calculated": raw_attr.get('is_calculated', False),
-                        "calculation_dependency": raw_attr.get('calculation_dependency'),
-                        "source_metadata": {}
-                    }
-                    attributes.append(attr)
-                
-                # Transform entity to common format
-                entity = {
-                    "entity_name": raw_entity.get('entity_name', ''),
-                    "description": raw_entity.get('description', ''),
-                    "source_type": "Guardrails",
-                    "source_info": {
-                        "files": raw_entity.get('source_files', []),
-                        "api": raw_entity.get('source_api'),
-                        "schema": None,
-                        "table": None,
-                        "url": None,
-                        "version": None
-                    },
-                    "business_context": raw_entity.get('business_context'),
-                    "technical_context": None,
-                    "ai_metadata": {
-                        "selection_reasoning": None,
-                        "pruning_notes": None
-                    },
-                    "attributes": attributes,
-                    "source_metadata": {}
-                }
-                entities.append(entity)
-            
-            total_attrs = sum(len(e.get('attributes', [])) for e in entities)
-            
-            output = {
-                "rationalization_metadata": {
-                    "source_type": "Guardrails",
-                    "cdm_domain": self.cdm_domain,
-                    "cdm_classification": self.cdm_classification,
-                    "rationalization_timestamp": datetime.now().isoformat(),
-                    "files_processed": len(self.guardrails_files),
-                    "entities_processed": len(entities),
-                    "attributes_processed": total_attrs
-                },
-                "entities": entities,
-                "reference_data": {
-                    "value_sets": [],
-                    "code_systems": []
-                }
-            }
-            
-            output_file = output_path / f"rationalized_guardrails_{domain_safe}_{timestamp}.json"
-            
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(output, f, indent=2)
-            
-            print(f"  ✓ Saved: {output_file.name}")
-            print(f"    Entities: {len(entities)}")
-            print(f"    Attributes: {total_attrs}")
-            
-            return str(output_file)
-            
-        except json.JSONDecodeError as e:
-            print(f"  ERROR: Failed to parse LLM response: {e}")
-            print(f"  Response preview: {response[:500]}...")
-            raise
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(output, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n  ✓ Saved: {output_file.name}")
+        print(f"    Entities: {len(entities)}")
+        print(f"    Attributes: {total_attrs}")
+        
+        return str(output_file)
 
 
 if __name__ == "__main__":
