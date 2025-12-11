@@ -29,6 +29,6 @@
       "fhir_assessment": {},
       "ncpdp_assessment": {}
     },
-    "generator_version": "2.1"
+    "generator_version": "3.0"
   }
 }

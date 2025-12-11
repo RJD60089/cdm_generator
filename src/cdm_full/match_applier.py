@@ -104,8 +104,19 @@ def apply_match_files(
                 source_attr_name = attr_mapping.get("source_attribute", "")
                 
                 if disposition == "mapped":
-                    cdm_ent_name = attr_mapping.get("cdm_entity", "")
-                    cdm_attr_name = attr_mapping.get("cdm_attribute", "")
+                    cdm_ent_name = attr_mapping.get("cdm_entity") or ""
+                    cdm_attr_name = attr_mapping.get("cdm_attribute") or ""
+                    
+                    # Skip if missing required fields
+                    if not cdm_ent_name or not cdm_attr_name:
+                        application_report["application_errors"].append({
+                            "source_type": source_type,
+                            "source_entity": source_entity_name,
+                            "source_attribute": source_attr_name,
+                            "error": f"Mapped entry missing cdm_entity or cdm_attribute: entity={cdm_ent_name}, attr={cdm_attr_name}"
+                        })
+                        source_unmapped += 1
+                        continue
                     
                     cdm_ent_normalized = cdm_ent_name.lower()
                     cdm_attr_normalized = cdm_attr_name.lower()

@@ -188,62 +188,70 @@ Generate the rationalized JSON now."""
         return prompt
     
     def save_prompt(self, prompt: str, output_dir: Path, file_index: int) -> dict:
-        """Save prompt to file and return stats"""
+        """Save prompt to file and return stats."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         prompts_dir = output_dir / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)
         
-        output_file = prompts_dir / f"guardrails_rationalization_{file_index:02d}_{timestamp}.txt"
-        with open(output_file, 'w', encoding='utf-8') as f:
+        prompt_file = prompts_dir / f"guardrails_prompt_{file_index}_{timestamp}.txt"
+        
+        with open(prompt_file, 'w', encoding='utf-8') as f:
             f.write(prompt)
         
+        # Estimate tokens (rough: 4 chars per token)
+        char_count = len(prompt)
+        token_estimate = char_count // 4
+        
         return {
-            'file': str(output_file),
-            'characters': len(prompt),
-            'tokens_estimate': len(prompt) // 4
+            "file": str(prompt_file),
+            "characters": char_count,
+            "tokens_estimate": token_estimate
         }
     
     def _parse_ai_response(self, response: str) -> Dict:
-        """Parse AI response, stripping markdown if present."""
-        response_clean = response.strip()
-        if response_clean.startswith("```"):
-            lines = response_clean.split("\n")
-            # Remove first and last lines (```json and ```)
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            response_clean = "\n".join(lines)
+        """Parse AI response, handling markdown code blocks."""
+        text = response.strip()
         
-        return json.loads(response_clean)
+        # Remove markdown code blocks if present
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+        
+        if text.endswith("```"):
+            text = text[:-3]
+        
+        return json.loads(text.strip())
     
     def _call_llm(self, prompt: str) -> Dict:
-        """Call LLM and return parsed response."""
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a business analyst expert. Return ONLY valid JSON with no markdown, no code blocks, no commentary."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+        """Call LLM and parse response."""
+        if self.llm is None:
+            raise ValueError("LLM client is required for live mode (not dry run)")
         
+        messages = [{"role": "user", "content": prompt}]
         response, token_usage = self.llm.chat(messages)
+        
         return self._parse_ai_response(response)
     
-    def _transform_to_common_format(self, rationalized_data: Dict) -> Dict:
-        """Transform AI output to common format for final output."""
-        raw_entities = rationalized_data.get('rationalized_entities', [])
-        entities = []
+    def _transform_to_common_format(self, rationalized_state: Dict) -> List[Dict[str, Any]]:
+        """
+        Transform AI rationalized output to common format.
+        
+        Args:
+            rationalized_state: Raw AI output with rationalized_entities
+            
+        Returns:
+            List of entity dicts in common format
+        """
+        raw_entities = rationalized_state.get('rationalized_entities', [])
+        entities: List[Dict[str, Any]] = []
         
         for raw_entity in raw_entities:
             raw_attrs = raw_entity.get('attributes', [])
-            attributes = []
+            attributes: List[Dict[str, Any]] = []
             
             for raw_attr in raw_attrs:
-                attr = {
+                attr: Dict[str, Any] = {
                     "attribute_name": raw_attr.get('attribute_name', ''),
                     "description": raw_attr.get('description', ''),
                     "data_type": raw_attr.get('data_type', 'string'),
@@ -270,7 +278,7 @@ Generate the rationalized JSON now."""
                 }
                 attributes.append(attr)
             
-            entity = {
+            entity: Dict[str, Any] = {
                 "entity_name": raw_entity.get('entity_name', ''),
                 "description": raw_entity.get('description', ''),
                 "source_type": "Guardrails",
@@ -313,7 +321,7 @@ Generate the rationalized JSON now."""
             return None
         
         # Initialize rationalized state
-        rationalized_state = None
+        rationalized_state: Optional[Dict] = None
         total_files = len(self.guardrails_files)
         
         print(f"\n  Processing {total_files} guardrails file(s) iteratively...")
@@ -362,13 +370,17 @@ Generate the rationalized JSON now."""
             return None
         
         # Transform final state to common format and save
+        if rationalized_state is None:
+            print("  ERROR: No rationalized state produced")
+            return None
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         domain_safe = self.cdm_domain.replace(' ', '_')
         
         entities = self._transform_to_common_format(rationalized_state)
         total_attrs = sum(len(e.get('attributes', [])) for e in entities)
         
-        output = {
+        output: Dict[str, Any] = {
             "rationalization_metadata": {
                 "source_type": "Guardrails",
                 "cdm_domain": self.cdm_domain,
@@ -412,7 +424,8 @@ if __name__ == "__main__":
 # ORCHESTRATOR WRAPPER
 # =============================================================================
 
-def run_guardrails_rationalization(config, outdir, llm=None, dry_run=False, config_path=None):
+def run_guardrails_rationalization(config: Any, outdir: str, llm: Optional[Any] = None, 
+                                   dry_run: bool = False, config_path: Optional[str] = None) -> Optional[str]:
     """
     Wrapper function for orchestrator compatibility.
     

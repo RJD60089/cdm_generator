@@ -3,11 +3,13 @@
 Unified CDM Generation Orchestrator
 
 Interactive flow:
-  1. Dry run or live mode selection
-  2. Model selection (if live)
-  3. Step-by-step execution with granular control
+  1. Config generation or refresh (Step 0)
+  2. Dry run or live mode selection
+  3. Model selection (if live)
+  4. Step-by-step execution with granular control
 
-Runs all steps from rationalization through Excel generation:
+Steps:
+  0 - Config Generation (FHIR, NCPDP, Glue analysis)
   1 - Input Rationalization (FHIR, NCPDP, Guardrails, Glue)
   2 - Identify Foundational CDM Generation Mode
   3 - Build Foundational CDM (CDM JSON)
@@ -24,47 +26,21 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 
-from src.config import load_config
+# Use shared config utilities
+from src.config import (
+    load_config,
+    find_latest_config,
+    find_base_config,
+    get_config_dir,
+    safe_cdm_name,
+)
 from src.core.llm_client import LLMClient
 from src.core.model_selector import MODEL_OPTIONS, select_model, prompt_user
 
 load_dotenv()
-
-
-def find_latest_config(base_name: str) -> Path:
-    """Find latest timestamped config file from base name"""
-    # Extract base name without extension
-    base = Path(base_name).stem  # e.g., "config_plan" or just "plan"
-    
-    # If just domain name provided, prefix with config_
-    if not base.startswith("config_"):
-        domain = base  # "plan"
-        base = f"config_{base}"  # "config_plan"
-    else:
-        # Extract domain from config_plan -> plan
-        domain = base.replace("config_", "")
-    
-    # Only one config location per CDM
-    config_dir = Path("input/business") / f"cdm_{domain}" / "config"
-    
-    if not config_dir.exists():
-        raise FileNotFoundError(f"Config directory not found: {config_dir}")
-    
-    # Find all matching timestamped configs
-    pattern = f"{base}_*.json"
-    matches = sorted(config_dir.glob(pattern), reverse=True)
-    
-    if matches:
-        return matches[0]
-    
-    # Try exact match
-    exact = config_dir / f"{base}.json"
-    if exact.exists():
-        return exact
-    
-    raise FileNotFoundError(f"No config file found matching: {base_name} in {config_dir}")
 
 
 def find_existing_full_cdm(base_outdir: Path, domain: str) -> Path | None:
@@ -85,32 +61,71 @@ def find_existing_full_cdm(base_outdir: Path, domain: str) -> Path | None:
     return matches[0]
 
 
+def run_step0_config_generation(cdm_name: str, llm: Optional[LLMClient] = None, dry_run: bool = False) -> Optional[Path]:
+    """Run Step 0: Config Generation.
+    
+    Args:
+        cdm_name: CDM name
+        llm: LLM client (optional for dry run)
+        dry_run: If True, save prompts only
+        
+    Returns:
+        Path to config file, or None if not found
+    """
+    from src.config.config_generator import ConfigGenerator
+    
+    print(f"\n{'='*60}")
+    print(f"STEP 0: CONFIG GENERATION")
+    print(f"{'='*60}")
+    
+    # Check current config state
+    latest = find_latest_config(cdm_name)
+    base = find_base_config(cdm_name)
+    
+    if latest:
+        print(f"\n   Source config: {latest.name}")
+    elif base:
+        print(f"\n   Source config: {base.name} (base)")
+    else:
+        print(f"\n   ❌ No config found for CDM: {cdm_name}")
+        config_dir = get_config_dir(cdm_name)
+        safe_name = safe_cdm_name(cdm_name)
+        print(f"      Expected: {config_dir}/config_{safe_name}.json")
+        sys.exit(1)
+    
+    # Run config generation
+    generator = ConfigGenerator(cdm_name, llm_client=llm)
+    new_config = generator.run(dry_run=dry_run)
+    
+    # Return new config if generated, otherwise source
+    if new_config:
+        return new_config
+    
+    return latest or base
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="CDM Generation Orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Example:
+Examples:
   python cdm_orchestrator.py plan
-  python cdm_orchestrator.py config_plan.json
+  python cdm_orchestrator.py formulary
+  python cdm_orchestrator.py "plan and benefit"
         """
     )
     
-    ap.add_argument("config", help="Config file base name or domain (e.g., 'plan' or 'config_plan.json')")
+    ap.add_argument("cdm_name", help="CDM name (e.g., 'plan', 'formulary', 'Plan and Benefit')")
     
     args = ap.parse_args()
+    cdm_name = args.cdm_name
     
     try:
-        # Find latest timestamped config
-        config_file = find_latest_config(args.config)
-        print(f"Using configuration: {config_file}")
-        
-        # Load configuration
-        config = load_config(str(config_file))
-        print(f"✓ Configuration loaded")
-        print(f"  Domain: {config.cdm.domain}")
-        print(f"  Type: {config.cdm.type}")
-        print(f"  Description: {config.cdm.description}")
+        print(f"\n{'='*60}")
+        print(f"CDM GENERATION ORCHESTRATOR")
+        print(f"{'='*60}")
+        print(f"   CDM: {cdm_name}")
         
         # === 1. DRY RUN OR LIVE? ===
         print(f"\n{'='*60}")
@@ -137,6 +152,31 @@ Example:
             )
             print(f"✓ LLM initialized: {llm.model}")
             print(f"{'='*60}")
+        
+        # === STEP 0: CONFIG GENERATION ===
+        run_config_gen = prompt_user("\nRun Step 0: Config Generation?", default="N")
+        
+        if run_config_gen:
+            config_file = run_step0_config_generation(cdm_name, llm, dry_run)
+            if not config_file:
+                print(f"\n❌ Config generation failed for CDM: {cdm_name}")
+                sys.exit(1)
+        else:
+            # Find existing config
+            config_file = find_latest_config(cdm_name)
+            if not config_file:
+                print(f"\n❌ No config found for CDM: {cdm_name}")
+                print(f"   Run Step 0 to generate configuration")
+                sys.exit(1)
+        
+        print(f"\nUsing configuration: {config_file}")
+        
+        # Load configuration
+        config = load_config(str(config_file))
+        print(f"✓ Configuration loaded")
+        print(f"  Domain: {config.cdm.domain}")
+        print(f"  Type: {config.cdm.type}")
+        print(f"  Description: {config.cdm.description}")
         
         # === 3. STEP SELECTION ===
         print(f"\n{'='*60}")
@@ -312,10 +352,6 @@ Example:
                     print(f"   ⚠️  AI mode determination not yet implemented.")
                     print(f"   Defaulting to HYBRID mode.")
                     cdm_generation_mode = 'hybrid'
-                    # Future: call id_foundational_model here
-                    # from src.steps.id_foundational_model import determine_generation_mode
-                    # result = determine_generation_mode(config, llm, rationalized_dir)
-                    # Display result and reasoning, prompt for accept/override
                     break
                 elif choice == 'C':
                     cdm_generation_mode = None
@@ -346,10 +382,6 @@ Example:
             if dry_run:
                 print(f"\n🔍 DRY RUN MODE - Prompts will be saved to: {cdm_outdir / 'prompts'}")
             
-            # Step 3a: Build Foundational CDM
-            # Future: mode will drive prompt selection
-            # - 'standards': use standards-first prompt
-            # - 'hybrid': use current balanced prompt
             print(f"\n=== Step 3a: Build Foundational CDM ({mode}) ===")
             from src.cdm_builder.build_foundational_cdm import run_step3a
             
@@ -383,7 +415,7 @@ Example:
             
             cdm = run_consolidation_refinement(
                 config=config,
-                cdm_file=None,  # Auto-finds latest
+                cdm_file=None,
                 outdir=cdm_outdir,
                 llm=llm,
                 dry_run=dry_run
@@ -406,7 +438,7 @@ Example:
             
             cdm = run_pk_fk_validation(
                 config=config,
-                cdm_file=None,  # Auto-finds latest
+                cdm_file=None,
                 outdir=cdm_outdir,
                 llm=llm,
                 dry_run=dry_run
@@ -478,7 +510,7 @@ Example:
                 if generate_cdm or sources_to_map or dry_run:
                     full_cdm = run_build_full_cdm(
                         config=config,
-                        cdm_file=None,  # Auto-finds latest
+                        cdm_file=None,
                         outdir=base_outdir,
                         llm=llm,
                         dry_run=dry_run,

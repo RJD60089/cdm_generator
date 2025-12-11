@@ -8,9 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-# Import converter
-from src.converters import convert_glue_to_json
-
 
 class GlueRationalizer:
     def __init__(self, config_path: str, llm: Optional[Any] = None, dry_run: bool = False):
@@ -18,7 +15,7 @@ class GlueRationalizer:
         self.dry_run = dry_run
         self.prompts_dir: Optional[Path] = None
         
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
         self.cdm_domain = self.config.get('cdm', {}).get('domain', '')
@@ -33,23 +30,47 @@ class GlueRationalizer:
         print(f"  Domain: {self.cdm_domain}")
         print(f"  Glue files: {len(self.glue_files)}")
     
-    def build_prompt(self) -> str:
-        """Build Glue rationalization prompt with CDM description"""
+    def _load_glue_tables(self) -> List[Dict[str, Any]]:
+        """
+        Load all Glue tables from configured files.
         
-        # Convert files to JSON
-        glue_json = []
+        Handles both:
+        - Consolidated format: single file with array of tables
+        - Individual format: multiple files with single table each
+        
+        Returns:
+            List of table definitions
+        """
+        all_tables: List[Dict[str, Any]] = []
+        
         for glue_file in self.glue_files:
-            content = convert_glue_to_json(glue_file)
-            # Parse the JSON string returned by converter
-            content_dict = json.loads(content)
-            glue_json.append({
-                'filename': Path(glue_file).name,
-                'content': content_dict
-            })
-            # Print file info
-            columns = content_dict.get('Columns', [])
-            print(f"\n  File: {Path(glue_file).name}")
-            print(f"    Columns: {len(columns)}")
+            filepath = Path(glue_file)
+            print(f"\n  Loading: {filepath.name}")
+            
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = json.load(f)
+            
+            # Handle array format (consolidated file)
+            if isinstance(content, list):
+                print(f"    Tables: {len(content)}")
+                for table in content:
+                    table['_source_file'] = filepath.name
+                    all_tables.append(table)
+            # Handle single table format
+            elif isinstance(content, dict):
+                print(f"    Table: {content.get('Name', 'unknown')}")
+                content['_source_file'] = filepath.name
+                all_tables.append(content)
+        
+        return all_tables
+    
+    def build_prompt(self, tables: List[Dict[str, Any]]) -> str:
+        """Build Glue rationalization prompt with CDM description."""
+        
+        # Summarize tables for prompt
+        for table in tables:
+            columns = table.get('StorageDescriptor', {}).get('Columns', [])
+            print(f"    {table.get('Name')}: {len(columns)} columns")
         
         # Build prompt with CDM context
         prompt = f"""You are a data architect rationalizing AWS Glue table definitions for a PBM CDM.
@@ -62,7 +83,7 @@ class GlueRationalizer:
 
 ## YOUR TASK
 
-Analyze the {len(self.glue_files)} AWS Glue schema files and rationalize them into a unified set of technical entities and attributes that aligns with the CDM description above.
+Analyze the {len(tables)} AWS Glue table definitions and rationalize them into a unified set of technical entities and attributes that aligns with the CDM description above.
 
 ## RATIONALIZATION GOALS
 
@@ -86,14 +107,14 @@ Return ONLY valid JSON in this structure:
       "entity_name": "Plan",
       "source_schema": "source_navitus_bpm_plan_event",
       "source_table": "plan_event",
-      "source_files": ["plan_bpm_tables.json"],
+      "source_files": ["GLUE_plan_cdm.json"],
       "description": "...",
       "technical_context": "...",
       "attributes": [
         {{
           "attribute_name": "detail_planid",
           "source_column": "detail_planid",
-          "source_files": ["plan_bpm_tables.json"],
+          "source_files": ["GLUE_plan_cdm.json"],
           "data_type": "int",
           "max_length": null,
           "precision": null,
@@ -143,12 +164,14 @@ For nested/struct fields:
 
 ---
 
-## AWS GLUE SCHEMA FILES
+## AWS GLUE TABLE DEFINITIONS
 
 """
         
-        for i, glue_data in enumerate(glue_json, 1):
-            prompt += f"### Glue Schema File {i}: {glue_data['filename']}\n\n```json\n{json.dumps(glue_data['content'], indent=2)}\n```\n\n"
+        for i, table in enumerate(tables, 1):
+            # Remove internal tracking field before serializing
+            table_copy = {k: v for k, v in table.items() if not k.startswith('_')}
+            prompt += f"### Table {i}: {table.get('Name', 'unknown')}\n\n```json\n{json.dumps(table_copy, indent=2)}\n```\n\n"
         
         prompt += """
 ---
@@ -159,7 +182,7 @@ Generate the rationalized JSON now.
         return prompt
     
     def save_prompt(self, prompt: str, output_dir: Path) -> dict:
-        """Save prompt to file and return stats"""
+        """Save prompt to file and return stats."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         prompts_dir = output_dir / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)
@@ -191,8 +214,17 @@ Generate the rationalized JSON now.
             print("  No glue files configured, skipping")
             return None
         
+        # Load all tables from configured files
+        tables = self._load_glue_tables()
+        
+        if not tables:
+            print("  No tables found in glue files, skipping")
+            return None
+        
+        print(f"\n  Total tables: {len(tables)}")
+        
         # Build prompt
-        prompt = self.build_prompt()
+        prompt = self.build_prompt(tables)
         
         # Dry run - save prompt and exit
         if self.dry_run:
@@ -206,6 +238,9 @@ Generate the rationalized JSON now.
             return None
         
         # Live mode - call LLM
+        if self.llm is None:
+            raise ValueError("LLM client is required for live mode (not dry run)")
+        
         print(f"  Calling LLM...")
         
         messages = [
@@ -237,15 +272,15 @@ Generate the rationalized JSON now.
             
             # Transform entities to common format
             raw_entities = rationalized_data.get('rationalized_entities', [])
-            entities = []
+            entities: List[Dict[str, Any]] = []
             
             for raw_entity in raw_entities:
                 # Transform attributes to common format
                 raw_attrs = raw_entity.get('attributes', [])
-                attributes = []
+                attributes: List[Dict[str, Any]] = []
                 
                 for raw_attr in raw_attrs:
-                    attr = {
+                    attr: Dict[str, Any] = {
                         "attribute_name": raw_attr.get('attribute_name', ''),
                         "description": raw_attr.get('description', ''),
                         "data_type": raw_attr.get('data_type', 'string'),
@@ -273,7 +308,7 @@ Generate the rationalized JSON now.
                     attributes.append(attr)
                 
                 # Transform entity to common format
-                entity = {
+                entity: Dict[str, Any] = {
                     "entity_name": raw_entity.get('entity_name', ''),
                     "description": raw_entity.get('description', ''),
                     "source_type": "Glue",
@@ -298,15 +333,16 @@ Generate the rationalized JSON now.
             
             total_attrs = sum(len(e.get('attributes', [])) for e in entities)
             
-            output = {
+            output: Dict[str, Any] = {
                 "rationalization_metadata": {
                     "source_type": "Glue",
                     "cdm_domain": self.cdm_domain,
                     "cdm_classification": self.cdm_classification,
                     "rationalization_timestamp": datetime.now().isoformat(),
                     "files_processed": len(self.glue_files),
-                    "entities_processed": len(entities),
-                    "attributes_processed": total_attrs
+                    "tables_processed": len(tables),
+                    "entities_produced": len(entities),
+                    "attributes_produced": total_attrs
                 },
                 "entities": entities,
                 "reference_data": {
@@ -318,7 +354,7 @@ Generate the rationalized JSON now.
             output_file = output_path / f"rationalized_glue_{domain_safe}_{timestamp}.json"
             
             with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(output, f, indent=2)
+                json.dump(output, f, indent=2, ensure_ascii=False)
             
             print(f"  ✓ Saved: {output_file.name}")
             print(f"    Entities: {len(entities)}")
@@ -347,7 +383,8 @@ if __name__ == "__main__":
 # ORCHESTRATOR WRAPPER
 # =============================================================================
 
-def run_glue_rationalization(config, outdir, llm=None, dry_run=False, config_path=None):
+def run_glue_rationalization(config: Any, outdir: str, llm: Optional[Any] = None, 
+                             dry_run: bool = False, config_path: Optional[str] = None) -> Optional[str]:
     """
     Wrapper function for orchestrator compatibility.
     
