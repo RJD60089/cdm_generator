@@ -1,20 +1,18 @@
 # src/cdm_full/postprocess_sensitivity.py
 """
-PHI/PII Sensitivity Post-Processor
+Sensitivity Post-Processor
 
-Uses AI to identify Protected Health Information (PHI) and 
-Personally Identifiable Information (PII) in the Full CDM.
+Uses AI to identify sensitive data attributes in the Full CDM.
+Categorizes attributes as containing personal identifiers, health-related
+information, or both for internal data governance documentation.
 
-AI knows:
-- HIPAA Safe Harbor 18 identifiers (legal PHI definition)
-- Standard PII definitions
-- Context from descriptions, entity relationships, and business rules
+Pattern matches postprocess_cde.py which works reliably.
 """
 
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 from src.core.llm_client import LLMClient
@@ -31,97 +29,145 @@ class SensitivityResult:
     phi_reason: str
 
 
-SENSITIVITY_PROMPT = """You are a data privacy expert with deep knowledge of:
-- HIPAA Safe Harbor method (18 PHI identifiers)
-- PII definitions under GDPR, CCPA, and US privacy laws
-- Healthcare/pharmacy data sensitivity
+# =============================================================================
+# PROMPT TEMPLATE (matches CDE pattern)
+# =============================================================================
 
-Analyze the CDM below and classify EACH attribute for PHI and PII.
+SENSITIVITY_PROMPT = """You are a data governance specialist categorizing sensitive data attributes in a Pharmacy Benefit Management (PBM) Canonical Data Model.
 
-FULL CDM:
+IMPORTANT: Only identify attributes that ARE sensitive. Non-sensitive attributes should be omitted from your response.
+
+FULL CDM (includes entities, attributes, descriptions, business rules, relationships):
 {cdm_json}
 
-For EVERY attribute in EVERY entity, respond with a JSON array where each item has:
-- entity: entity name
-- attribute: attribute name  
-- is_pii: true/false - Is this Personally Identifiable Information?
-- is_phi: true/false - Is this Protected Health Information under HIPAA?
-- pii_reason: Brief reason if PII (empty string if not)
-- phi_reason: Brief reason if PHI (empty string if not)
+=== SENSITIVITY CATEGORIES ===
 
-PHI includes the HIPAA 18: names, geographic data smaller than state, dates (except year), phone/fax, email, SSN, medical record numbers, health plan beneficiary numbers, account numbers, certificate/license numbers, vehicle identifiers, device identifiers, URLs, IP addresses, biometric identifiers, photos, and any other unique identifying number.
+1. PERSONAL IDENTIFIERS (maps to PII)
+   Data that could identify a specific individual:
+   - Names (first, last, full name)
+   - Contact information (address, phone, email, fax)
+   - Government identifiers (SSN, license numbers)
+   - Member/subscriber/patient identifiers  
+   - Account numbers tied to individuals
+   - Biometric data
+   - Device identifiers linked to individuals
 
-PII includes: name, address, email, phone, SSN, DOB, financial account numbers, government IDs, biometrics.
+2. HEALTH RELATED (maps to PHI)
+   Data about medical conditions or treatments:
+   - Diagnoses and conditions
+   - Medications and prescriptions (NDC, GPI, drug names)
+   - Clinical notes and observations
+   - Treatment plans and procedures
+   - Lab results and vitals
+   - Healthcare provider information when linked to patient care
 
-IMPORTANT CONTEXT RULES:
-- Consider the ENTITY CONTEXT - "member_id" in a "Member" entity is PII, but "id" in a "DrugClass" entity is not
-- Consider BUSINESS RULES and DESCRIPTIONS for additional context
-- Consider RELATIONSHIPS - an FK to a member table may indicate indirect PII
-- Plan/Group/Carrier identifiers are generally NOT PII unless they can identify individuals
-- Effective dates, status fields, and audit timestamps are NOT PHI/PII
+=== CONTEXT RULES ===
 
-Respond ONLY with valid JSON array, no other text."""
+- Consider the ENTITY NAME - "member_id" in a "Member" or "Episode" entity identifies individuals
+- Drug codes (NDC, GPI) ARE health-related when associated with a member/episode
+- Reference/lookup data (drug classifications without member context, status codes) is NOT sensitive
+- Timestamps and audit fields are NOT sensitive
+- Plan/Group/Carrier identifiers are generally NOT sensitive
+
+=== WHAT TO SKIP ===
+
+Do NOT include:
+- Primary keys or system-generated IDs (unless they identify individuals)
+- Status fields, flags, or codes
+- Audit timestamps (created_at, updated_at)
+- Reference/lookup table attributes
+- Descriptive metadata fields
+
+=== OUTPUT FORMAT ===
+
+Return a JSON object with identified sensitive attributes. Be selective - typically 20-60 attributes.
+
+{{
+  "sensitive_attributes": [
+    {{
+      "entity": "EntityName",
+      "attribute": "attribute_name",
+      "has_personal_identifiers": true,
+      "has_health_related": false,
+      "personal_reason": "Brief explanation if personal identifier",
+      "health_reason": "Brief explanation if health related"
+    }}
+  ]
+}}
+
+Focus on QUALITY over quantity. Every attribute should clearly be sensitive."""
+
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def parse_sensitivity_response(response_text: str) -> List[Dict[str, Any]]:
+    """Parse LLM response to extract sensitive attributes."""
+    text = response_text.strip()
+    
+    # Look for JSON block
+    if "```json" in text:
+        start = text.find("```json") + 7
+        end = text.find("```", start)
+        text = text[start:end].strip()
+    elif "```" in text:
+        start = text.find("```") + 3
+        end = text.find("```", start)
+        text = text[start:end].strip()
+    
+    # Parse JSON
+    try:
+        data = json.loads(text)
+        return data.get("sensitive_attributes", [])
+    except json.JSONDecodeError:
+        # Try to find just the array
+        if "[" in text and "]" in text:
+            start = text.find("[")
+            end = text.rfind("]") + 1
+            try:
+                return json.loads(text[start:end])
+            except:
+                pass
+    
+    return []
 
 
 def classify_with_ai(
     cdm: Dict[str, Any],
     llm: LLMClient
 ) -> List[SensitivityResult]:
-    """Use AI to classify all attributes for PHI/PII using full CDM context."""
+    """Use AI to identify sensitive attributes using full CDM context."""
     
     prompt = SENSITIVITY_PROMPT.format(
         cdm_json=json.dumps(cdm, indent=2, default=str)
     )
     
+    # Match CDE pattern: no system message, just user prompt
     response, _ = llm.chat(
         messages=[{"role": "user", "content": prompt}]
     )
     
-    # Parse JSON response
-    try:
-        # Clean response - remove markdown if present
-        clean = response.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        clean = clean.strip()
-        
-        results = json.loads(clean)
-    except json.JSONDecodeError as e:
-        print(f"      Warning: Failed to parse AI response: {e}")
-        return []
+    # Parse response using robust parser
+    results = parse_sensitivity_response(response)
     
-    # Handle wrapped response (e.g., {"results": [...]})
-    if isinstance(results, dict):
-        # Try common wrapper keys
-        for key in ["results", "attributes", "classifications", "data"]:
-            if key in results:
-                results = results[key]
-                break
-        else:
-            # No known wrapper, can't parse
-            print(f"      Warning: Unexpected response format (dict without known wrapper)")
-            return []
-    
-    # Ensure we have a list
-    if not isinstance(results, list):
-        print(f"      Warning: Expected list, got {type(results).__name__}")
+    if not results:
+        print(f"      Warning: No sensitive attributes parsed from response")
+        print(f"      Response preview: {response[:300]}...")
         return []
     
     # Convert to SensitivityResult objects
     sensitivity_results = []
     for item in results:
         if not isinstance(item, dict):
-            # Skip non-dict items
             continue
         sensitivity_results.append(SensitivityResult(
             entity_name=item.get("entity", ""),
             attribute_name=item.get("attribute", ""),
-            is_pii=item.get("is_pii", False),
-            is_phi=item.get("is_phi", False),
-            pii_reason=item.get("pii_reason", ""),
-            phi_reason=item.get("phi_reason", "")
+            is_pii=item.get("has_personal_identifiers", False),
+            is_phi=item.get("has_health_related", False),
+            pii_reason=item.get("personal_reason", ""),
+            phi_reason=item.get("health_reason", "")
         ))
     
     return sensitivity_results
@@ -133,7 +179,7 @@ def run_sensitivity_postprocess(
     dry_run: bool = False
 ) -> Dict[str, Any]:
     """
-    Run sensitivity analysis on Full CDM to add PHI/PII flags using AI.
+    Run sensitivity analysis on Full CDM to add sensitivity flags using AI.
     
     Args:
         cdm: Full CDM dictionary (will be modified)
@@ -153,7 +199,7 @@ def run_sensitivity_postprocess(
         for entity in cdm.get("entities", [])
     )
     
-    print(f"   Classifying {total_attrs} attributes with AI (full CDM context)...")
+    print(f"   Analyzing {total_attrs} attributes for sensitivity...")
     
     if dry_run:
         print(f"   (Dry run - skipping API calls)")
@@ -162,16 +208,24 @@ def run_sensitivity_postprocess(
     # Classify using full CDM
     results = classify_with_ai(cdm, llm)
     
-    # Build lookup from results
-    result_lookup = {(r.entity_name, r.attribute_name): r for r in results}
+    if not results:
+        print(f"   ⚠️  WARNING: AI returned no sensitive attributes")
+        return cdm
     
-    # Update CDM with results
+    # Build lookup from results (case-insensitive matching)
+    result_lookup = {
+        (r.entity_name.lower(), r.attribute_name.lower()): r 
+        for r in results
+    }
+    
+    # Update CDM with results - default all to False, then set True for matches
     stats = {
         "total_attributes": total_attrs,
-        "classified": len(results),
+        "sensitive_identified": len(results),
         "pii_flagged": 0,
         "phi_flagged": 0,
-        "both_flagged": 0
+        "both_flagged": 0,
+        "matched": 0
     }
     
     for entity in cdm.get("entities", []):
@@ -179,8 +233,14 @@ def run_sensitivity_postprocess(
         for attr in entity.get("attributes", []):
             attr_name = attr.get("attribute_name", "")
             
-            result = result_lookup.get((entity_name, attr_name))
+            # Default to not sensitive
+            attr["is_pii"] = False
+            attr["is_phi"] = False
+            
+            # Case-insensitive lookup
+            result = result_lookup.get((entity_name.lower(), attr_name.lower()))
             if result:
+                stats["matched"] += 1
                 attr["is_pii"] = result.is_pii
                 attr["is_phi"] = result.is_phi
                 
@@ -200,15 +260,16 @@ def run_sensitivity_postprocess(
     # Update CDM metadata
     cdm["sensitivity_analysis"] = {
         "processed_date": datetime.now().isoformat(),
-        "method": "ai_full_cdm",
+        "method": "ai_selective",
         "stats": stats
     }
     
     print(f"   Sensitivity analysis complete:")
     print(f"      Total attributes: {stats['total_attributes']}")
-    print(f"      Classified by AI: {stats['classified']}")
+    print(f"      Sensitive identified: {stats['sensitive_identified']}")
+    print(f"      Matched to CDM: {stats['matched']}")
     print(f"      PII flagged: {stats['pii_flagged']}")
     print(f"      PHI flagged: {stats['phi_flagged']}")
-    print(f"      Both PHI+PII: {stats['both_flagged']}")
+    print(f"      Both: {stats['both_flagged']}")
     
     return cdm

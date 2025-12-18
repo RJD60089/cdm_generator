@@ -5,13 +5,15 @@ Orchestrates config generation by coordinating:
 - FHIR resource analysis (config_gen_fhir)
 - NCPDP standards analysis (config_gen_ncpdp)
 - Glue file consolidation (config_gen_glue)
+- Auto-discovery of guardrail and DDL files
 
 Flow:
 1. Must have base config - stop if none exists
 2. Always use latest timestamped config as source
 3. Prompt: Run Config gen? (Y/n)
 4. If Y: Prompt for each analysis (FHIR, NCPDP, Glue)
-5. Only update changed sections, preserve rest from source
+5. Auto-discover guardrails and DDL files from directories
+6. Only update changed sections, preserve rest from source
 
 Usage:
     python -m src.config.config_generator plan
@@ -69,7 +71,15 @@ class ConfigGenerator(ConfigGeneratorBase):
         print(f"   Domain: {source_config['cdm']['domain']}")
         print(f"   Type: {source_config['cdm']['type']}")
         
-        # Step 2: Run analyses based on user selections
+        # Step 2: Auto-discover guardrails and DDL files
+        guardrails_files = config_utils.list_guardrail_files(self.cdm_name)
+        ddl_files = config_utils.list_ddl_files(self.cdm_name)
+        
+        print(f"\n   Auto-discovered files:")
+        print(f"      Guardrails: {len(guardrails_files)}")
+        print(f"      DDL: {len(ddl_files)}")
+        
+        # Step 3: Run analyses based on user selections
         fhir_result = None
         ncpdp_result = None
         glue_result = None
@@ -93,7 +103,8 @@ class ConfigGenerator(ConfigGeneratorBase):
         
         # Step 4: Build updated config (merge changes into source)
         updated_config = self._merge_updates(
-            source_config, fhir_result, ncpdp_result, glue_result
+            source_config, fhir_result, ncpdp_result, glue_result,
+            guardrails_files, ddl_files
         )
         
         # Step 5: Save with new timestamp
@@ -148,17 +159,22 @@ class ConfigGenerator(ConfigGeneratorBase):
         source_config: Dict,
         fhir_result: Optional[Dict],
         ncpdp_result: Optional[Dict],
-        glue_result: Optional[Dict]
+        glue_result: Optional[Dict],
+        guardrails_files: List[str],
+        ddl_files: List[str]
     ) -> Dict:
         """Merge analysis results into source config.
         
         Only updates sections that were analyzed. Preserves all other fields.
+        Auto-discovered guardrails and DDL files always override config values.
         
         Args:
             source_config: Original config (source of truth for unchanged fields)
             fhir_result: FHIR analysis results (or None to preserve)
             ncpdp_result: NCPDP analysis results (or None to preserve)
             glue_result: Glue analysis results (or None to preserve)
+            guardrails_files: Auto-discovered guardrail filenames
+            ddl_files: Auto-discovered DDL filenames
             
         Returns:
             Updated config dict
@@ -170,6 +186,10 @@ class ConfigGenerator(ConfigGeneratorBase):
         # Ensure input_files exists
         if 'input_files' not in config:
             config['input_files'] = {}
+        
+        # Always update guardrails and DDL from auto-discovery (filename only)
+        config['input_files']['guardrails'] = guardrails_files
+        config['input_files']['ddl'] = ddl_files
         
         # Update FHIR if analyzed
         if fhir_result:

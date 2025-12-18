@@ -5,6 +5,7 @@ Provides common functions for:
 - Finding config directories and files by CDM name
 - Path normalization
 - File searching
+- Auto-discovery of guardrail and DDL files
 """
 import json
 from pathlib import Path
@@ -70,6 +71,70 @@ def get_config_dir(cdm_name: str) -> Path:
         Path to input/business/cdm_{name}/config/
     """
     return get_cdm_dir(cdm_name) / "config"
+
+
+def resolve_guardrail_file(cdm_name: str, filename: str) -> Path:
+    """Resolve guardrail filename to full path.
+    
+    Guardrail files are located at: input/business/cdm_{name}/guardrail/
+    
+    Args:
+        cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
+        filename: Guardrail filename only (e.g., 'GR_Navitus_DGBee_v1.0_API.xlsx')
+        
+    Returns:
+        Full path to file
+    """
+    return get_cdm_dir(cdm_name) / "guardrail" / filename
+
+
+def resolve_ddl_file(cdm_name: str, filename: str) -> Path:
+    """Resolve DDL filename to full path.
+    
+    DDL files are located at: input/business/cdm_{name}/ddl/
+    
+    Args:
+        cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
+        filename: DDL filename only (e.g., 'schema.sql')
+        
+    Returns:
+        Full path to file
+    """
+    return get_cdm_dir(cdm_name) / "ddl" / filename
+
+
+def list_guardrail_files(cdm_name: str) -> List[str]:
+    """Auto-discover all guardrail filenames for a CDM.
+    
+    Searches input/business/cdm_{name}/guardrail/ for *.xlsx files.
+    
+    Args:
+        cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
+        
+    Returns:
+        List of filenames (not full paths)
+    """
+    guardrail_dir = get_cdm_dir(cdm_name) / "guardrail"
+    if not guardrail_dir.exists():
+        return []
+    return [f.name for f in sorted(guardrail_dir.glob("*.xlsx"))]
+
+
+def list_ddl_files(cdm_name: str) -> List[str]:
+    """Auto-discover all DDL filenames for a CDM.
+    
+    Searches input/business/cdm_{name}/ddl/ for *.sql files.
+    
+    Args:
+        cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
+        
+    Returns:
+        List of filenames (not full paths)
+    """
+    ddl_dir = get_cdm_dir(cdm_name) / "ddl"
+    if not ddl_dir.exists():
+        return []
+    return [f.name for f in sorted(ddl_dir.glob("*.sql"))]
 
 
 def find_latest_config(cdm_name: str) -> Optional[Path]:

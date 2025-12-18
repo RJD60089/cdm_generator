@@ -19,33 +19,39 @@ def discover_sources(rationalized_dir: Path, domain: str) -> Dict[str, Path]:
     
     Args:
         rationalized_dir: Path to rationalized files directory
-        domain: CDM domain name (e.g., "Plan")
+        domain: CDM domain name (e.g., "Plan", "Utilization Management")
     
     Returns:
         Dict mapping source_type -> latest file path
     """
     discovered = {}
-    domain_lower = domain.lower()
+    # Normalize domain: "Utilization Management" -> "utilization_management"
+    domain_normalized = domain.lower().replace(' ', '_')
     
     pattern = "rationalized_*.json"
     for filepath in rationalized_dir.glob(pattern):
-        filename = filepath.stem  # rationalized_fhir_Plan_20251201_134436
+        filename = filepath.stem  # rationalized_fhir_Utilization_Management_20251201_134436
         parts = filename.split('_')
         
-        # Expected: rationalized_{source}_{domain}_{date}_{time}
-        if len(parts) >= 4 and parts[0] == 'rationalized':
+        # Expected: rationalized_{source}_{domain...}_{date}_{time}
+        # Domain may have multiple underscored parts (e.g., Utilization_Management)
+        # Last two parts are always date (YYYYMMDD) and time (HHMMSS)
+        if len(parts) >= 5 and parts[0] == 'rationalized':
             source_type = parts[1].lower()
-            file_domain = parts[2].lower()
+            
+            # Reconstruct domain from parts between source_type and timestamp
+            # parts[2:-2] = domain parts, parts[-2:] = date, time
+            file_domain = '_'.join(parts[2:-2]).lower()
             
             # Only include files for this domain
-            if file_domain != domain_lower:
+            if file_domain != domain_normalized:
                 continue
             
             # Track latest file per source type (by timestamp in filename)
             if source_type not in discovered:
                 discovered[source_type] = filepath
             else:
-                # Compare timestamps (last two parts)
+                # Compare timestamps (last two parts: date_time)
                 current_ts = '_'.join(parts[-2:])
                 existing_parts = discovered[source_type].stem.split('_')
                 existing_ts = '_'.join(existing_parts[-2:])

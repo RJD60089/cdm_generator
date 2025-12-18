@@ -7,6 +7,7 @@ Version 2.0:
 - Incremental rationalization (AI merges new file against prior state)
 - Improved prompt with scope filtering and lineage tracking
 - UTF-8 encoding throughout
+- Config uses filename-only, resolved via config_utils
 """
 
 import json
@@ -16,6 +17,7 @@ from typing import Dict, List, Any, Optional
 
 # Import converter - assumes src.converters module exists
 from src.converters import convert_guardrails_to_json
+from src.config import config_utils
 
 
 class GuardrailsRationalizer:
@@ -31,7 +33,7 @@ class GuardrailsRationalizer:
         self.cdm_classification = self.config.get('cdm', {}).get('type', 'Core')
         self.cdm_description = self.config.get('cdm', {}).get('description', '')
         
-        # Get guardrails files from config
+        # Get guardrails files from config (filename-only format)
         input_files = self.config.get('input_files', {})
         self.guardrails_files = input_files.get('guardrails', [])
         
@@ -193,7 +195,8 @@ Generate the rationalized JSON now."""
         prompts_dir = output_dir / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)
         
-        prompt_file = prompts_dir / f"guardrails_prompt_{file_index}_{timestamp}.txt"
+        domain_safe = self.cdm_domain.replace(' ', '_')
+        prompt_file = prompts_dir / f"guardrails_prompt_{domain_safe}_{file_index}_{timestamp}.txt"
         
         with open(prompt_file, 'w', encoding='utf-8') as f:
             f.write(prompt)
@@ -208,49 +211,34 @@ Generate the rationalized JSON now."""
             "tokens_estimate": token_estimate
         }
     
-    def _parse_ai_response(self, response: str) -> Dict:
-        """Parse AI response, handling markdown code blocks."""
-        text = response.strip()
-        
-        # Remove markdown code blocks if present
-        if text.startswith("```json"):
-            text = text[7:]
-        elif text.startswith("```"):
-            text = text[3:]
-        
-        if text.endswith("```"):
-            text = text[:-3]
-        
-        return json.loads(text.strip())
-    
     def _call_llm(self, prompt: str) -> Dict:
-        """Call LLM and parse response."""
+        """Call LLM and parse JSON response."""
         if self.llm is None:
-            raise ValueError("LLM client is required for live mode (not dry run)")
+            raise ValueError("LLM client not configured")
         
         messages = [{"role": "user", "content": prompt}]
-        response, token_usage = self.llm.chat(messages)
+        response_text, _ = self.llm.chat(messages)
         
-        return self._parse_ai_response(response)
+        # Clean response - remove markdown code blocks if present
+        text = response_text.strip()
+        if text.startswith("```"):
+            lines = text.split("```")
+            if len(lines) >= 2:
+                text = lines[1]
+                if text.startswith("json"):
+                    text = text[4:]
+                text = text.strip()
+        
+        return json.loads(text)
     
-    def _transform_to_common_format(self, rationalized_state: Dict) -> List[Dict[str, Any]]:
-        """
-        Transform AI rationalized output to common format.
+    def _transform_to_common_format(self, raw_output: Dict) -> List[Dict]:
+        """Transform raw AI output to common entity format."""
+        entities = []
         
-        Args:
-            rationalized_state: Raw AI output with rationalized_entities
+        for raw_entity in raw_output.get('rationalized_entities', []):
+            attributes = []
             
-        Returns:
-            List of entity dicts in common format
-        """
-        raw_entities = rationalized_state.get('rationalized_entities', [])
-        entities: List[Dict[str, Any]] = []
-        
-        for raw_entity in raw_entities:
-            raw_attrs = raw_entity.get('attributes', [])
-            attributes: List[Dict[str, Any]] = []
-            
-            for raw_attr in raw_attrs:
+            for raw_attr in raw_entity.get('attributes', []):
                 attr: Dict[str, Any] = {
                     "attribute_name": raw_attr.get('attribute_name', ''),
                     "description": raw_attr.get('description', ''),
@@ -326,11 +314,19 @@ Generate the rationalized JSON now."""
         
         print(f"\n  Processing {total_files} guardrails file(s) iteratively...")
         
-        for idx, gr_file in enumerate(self.guardrails_files, 1):
-            print(f"\n  [{idx}/{total_files}] Processing: {Path(gr_file).name}")
+        for idx, gr_filename in enumerate(self.guardrails_files, 1):
+            # Resolve filename to full path
+            gr_file = config_utils.resolve_guardrail_file(self.cdm_domain, gr_filename)
+            
+            print(f"\n  [{idx}/{total_files}] Processing: {gr_filename}")
+            
+            # Verify file exists
+            if not gr_file.exists():
+                print(f"    ⚠️  File not found: {gr_file}")
+                continue
             
             # Build prompt (with prior state for files 2+)
-            prompt = self.build_prompt(gr_file, prior_state=rationalized_state)
+            prompt = self.build_prompt(str(gr_file), prior_state=rationalized_state)
             
             # Dry run - save prompts and continue
             if self.dry_run:
@@ -361,7 +357,7 @@ Generate the rationalized JSON now."""
                 print(f"    ✓ Rationalized: {entity_count} entities, {attr_count} attributes")
                 
             except json.JSONDecodeError as e:
-                print(f"    ERROR: Failed to parse LLM response for {Path(gr_file).name}: {e}")
+                print(f"    ERROR: Failed to parse LLM response for {gr_filename}: {e}")
                 raise
         
         # Dry run complete

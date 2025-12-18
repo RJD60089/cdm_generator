@@ -1,6 +1,9 @@
 """
 FHIR Rationalization Module
-Transforms FHIR StructureDefinitions, ValueSets, and CodeSystems into unified rationalized format
+Transforms FHIR StructureDefinitions into unified rationalized format.
+
+Work Item 1: Skip VS/CS processing (handled in post-process via binding URLs)
+Work Item 2: Two-pass P1/P2 processing - P1 creates entities+attributes, P2 merges attributes into P1 entities
 """
 
 import json
@@ -27,25 +30,30 @@ class FHIRRationalizer:
         input_files = self.config.get('input_files', {})
         self.fhir_igs = input_files.get('fhir_igs', [])
         
-        # Separate by file type
+        # Work Item 1: Only process StructureDefinitions
+        # VS/CS are kept in config for post-process terminology enrichment
         self.structure_definitions = []
-        self.value_sets = []
-        self.code_systems = []
+        self.value_set_count = 0
+        self.code_system_count = 0
         
         for ig in self.fhir_igs:
             file_type = ig.get('file_type', '')
             if file_type == 'StructureDefinition':
                 self.structure_definitions.append(ig)
             elif file_type == 'ValueSet':
-                self.value_sets.append(ig)
+                self.value_set_count += 1
             elif file_type == 'CodeSystem':
-                self.code_systems.append(ig)
+                self.code_system_count += 1
+        
+        # Work Item 2: Separate by priority (default to 1 for backward compatibility)
+        self.p1_structures = [sd for sd in self.structure_definitions if sd.get('priority', 1) == 1]
+        self.p2_structures = [sd for sd in self.structure_definitions if sd.get('priority') == 2]
         
         print(f"  Config loaded: {config_path}")
         print(f"  Domain: {self.cdm_domain}")
-        print(f"  StructureDefinitions: {len(self.structure_definitions)}")
-        print(f"  ValueSets: {len(self.value_sets)}")
-        print(f"  CodeSystems: {len(self.code_systems)}")
+        print(f"  StructureDefinitions: {len(self.structure_definitions)} (P1: {len(self.p1_structures)}, P2: {len(self.p2_structures)})")
+        print(f"  ValueSets: {self.value_set_count} (skipped - used in post-process)")
+        print(f"  CodeSystems: {self.code_system_count} (skipped - used in post-process)")
     
     def extract_element_type(self, element: Dict[str, Any]) -> str:
         """Extract type from element, handling complex type structures"""
@@ -133,7 +141,7 @@ class FHIRRationalizer:
         if element.get('requirements'):
             attr["source_metadata"]["requirements"] = element.get('requirements')
         
-        # Add binding if present
+        # Add binding if present (Work Item 3 depends on this)
         binding = self.extract_binding(element)
         if binding:
             attr["source_metadata"]["binding"] = binding
@@ -219,27 +227,163 @@ CRITICAL:
 """
         return prompt
     
-    def prune_elements_with_ai(self, entity_name: str, ig_source: str, reasoning: str,
-                               elements: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int, int]:
-        """Use AI to prune elements, return filtered elements"""
+    def build_p2_prune_prompt(self, entity_name: str, ig_source: str, reasoning: str,
+                              elements: List[Dict[str, Any]], 
+                              p1_entities: List[Dict[str, Any]]) -> str:
+        """
+        Work Item 2: Build P2 prompt with P1 entity context.
         
-        prompt = self.build_prune_prompt(entity_name, ig_source, reasoning, elements)
+        P2 files add attributes to EXISTING P1 entities only - no new entities.
+        Full P1 entity+attribute metadata provided for context.
+        """
+        
+        # Simplify elements for AI
+        simplified = []
+        for elem in elements:
+            simplified.append({
+                "id": elem.get('id', ''),
+                "path": elem.get('path', ''),
+                "short": elem.get('short', ''),
+                "definition": elem.get('definition', ''),
+                "type": self.extract_element_type(elem),
+                "min": elem.get('min', 0),
+                "max": elem.get('max', '*')
+            })
+        
+        # Build P1 entity context with full attribute metadata
+        p1_context = []
+        for entity in p1_entities:
+            entity_summary = {
+                "entity_name": entity.get("entity_name"),
+                "description": entity.get("description", "")[:200],  # Truncate long descriptions
+                "attributes": []
+            }
+            for attr in entity.get("attributes", []):
+                entity_summary["attributes"].append({
+                    "attribute_name": attr.get("attribute_name"),
+                    "data_type": attr.get("data_type"),
+                    "description": attr.get("description", "")[:150],
+                    "required": attr.get("required", False)
+                })
+            p1_context.append(entity_summary)
+        
+        p1_entity_names = [e.get("entity_name") for e in p1_entities]
+        
+        prompt = f"""You are a data architect analyzing FHIR StructureDefinition elements for relevance to the CDM domain specified below.
+
+## CDM CONTEXT
+
+**Domain:** {self.cdm_domain}
+**Classification:** {self.cdm_classification}
+**Description:** {self.cdm_description}
+
+## PRIORITY 2 PROCESSING - ATTRIBUTE REFINEMENT ONLY
+
+This is a **Priority 2 (P2)** StructureDefinition. P2 files provide REFINEMENT to existing entities.
+
+**CRITICAL CONSTRAINTS:**
+1. P2 files can ONLY add attributes to entities already defined by Priority 1 (P1) files
+2. Do NOT keep elements that would create NEW entities
+3. ONLY keep elements that ADD VALUE to the existing P1 entities listed below
+4. If this P2 StructureDefinition does not meaningfully refine any P1 entity, return empty keep list
+
+## EXISTING P1 ENTITIES (with their current attributes)
+
+The following entities were defined by P1 StructureDefinitions. You may ONLY add attributes to these entities:
+
+**P1 Entity Names:** {json.dumps(p1_entity_names)}
+
+**Full P1 Entity Context:**
+```json
+{json.dumps(p1_context, indent=2)}
+```
+
+## P2 STRUCTUREDEFINITION TO ANALYZE
+
+**StructureDefinition:** {entity_name}
+**Source:** {ig_source}
+**Business Purpose:** {reasoning}
+
+## ELEMENTS ({len(elements)} total)
+
+```json
+{json.dumps(simplified, indent=2)}
+```
+
+## YOUR TASK
+
+Review each element and determine if it should be retained AS AN ATTRIBUTE ON AN EXISTING P1 ENTITY.
+
+An element should be kept ONLY if:
+1. It provides a valuable attribute for one of the P1 entities listed above
+2. The attribute is NOT already covered by existing P1 attributes (avoid duplicates)
+3. It adds refinement/detail that the P1 entity lacks
+4. It semantically belongs on that P1 entity
+
+## OUTPUT FORMAT
+
+Return ONLY valid JSON:
+
+```json
+{{
+  "p2_structure_name": "{entity_name}",
+  "elements_reviewed": {len(elements)},
+  "target_p1_entity": "<EXACT name from P1 Entity Names list, or 'NONE' if no match>",
+  "mapping_rationale": "<brief explanation of why this P2 maps to the target P1 entity>",
+  "keep": ["element.id1", "element.id2", ...]
+}}
+```
+
+CRITICAL: 
+- Return ONLY valid JSON (no markdown, no code blocks, no commentary)
+- target_p1_entity MUST be an exact name from the P1 Entity Names list, or "NONE"
+- If target_p1_entity is "NONE", keep list MUST be empty
+- Use exact element IDs from the "id" values provided
+- Only keep elements that add value to the specified target_p1_entity
+"""
+        return prompt
+    
+    def prune_elements_with_ai(self, entity_name: str, ig_source: str, reasoning: str,
+                               elements: List[Dict[str, Any]], 
+                               p1_entities: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], int, int, Optional[str]]:
+        """
+        Use AI to prune elements, return filtered elements.
+        
+        Args:
+            entity_name: Name of the entity being processed
+            ig_source: Source IG identifier
+            reasoning: Business reasoning for inclusion
+            elements: List of FHIR elements to evaluate
+            p1_entities: For P2 processing, the list of P1 entities for context
+            
+        Returns:
+            Tuple of (kept_elements, original_count, removed_count, target_p1_entity)
+            target_p1_entity is None for P1, or the target entity name for P2
+        """
+        
+        # Build appropriate prompt based on whether this is P1 or P2
+        if p1_entities is not None:
+            prompt = self.build_p2_prune_prompt(entity_name, ig_source, reasoning, elements, p1_entities)
+        else:
+            prompt = self.build_prune_prompt(entity_name, ig_source, reasoning, elements)
         
         # Dry run - save prompt
         if self.dry_run:
             if self.prompts_dir:
-                prompt_file = self.prompts_dir / f"prune_{entity_name}_{datetime.now().strftime('%H%M%S')}.txt"
+                priority_label = "p2" if p1_entities else "p1"
+                prompt_file = self.prompts_dir / f"prune_{priority_label}_{entity_name}_{datetime.now().strftime('%H%M%S')}.txt"
                 with open(prompt_file, 'w', encoding='utf-8') as f:
                     f.write(prompt)
                 print(f"    Prompt saved: {prompt_file.name}")
-            return elements, len(elements), 0
+            return elements, len(elements), 0, None
         
         # No LLM - return all
         if not self.llm:
             print(f"    Warning: No LLM client, skipping prune for {entity_name}")
-            return elements, len(elements), 0
+            return elements, len(elements), 0, None
         
-        print(f"    Pruning {entity_name} ({len(elements)} elements)...")
+        priority_label = "P2" if p1_entities else "P1"
+        print(f"    Pruning {entity_name} [{priority_label}] ({len(elements)} elements)...")
         
         messages = [
             {
@@ -266,6 +410,15 @@ CRITICAL:
             # Get list of element IDs to keep
             keep_ids = set(result.get('keep', []))
             
+            # For P2, extract target entity
+            target_p1_entity = None
+            if p1_entities is not None:
+                target_p1_entity = result.get('target_p1_entity')
+                if target_p1_entity == "NONE" or not target_p1_entity:
+                    print(f"    ✓ P2 has no matching P1 entity - skipping")
+                    return [], len(elements), len(elements), None
+                print(f"    Target P1 entity: {target_p1_entity}")
+            
             # Debug output
             print(f"    AI returned {len(keep_ids)} IDs to keep")
             
@@ -288,18 +441,26 @@ CRITICAL:
             
             print(f"    ✓ Kept {kept_count}/{original_count} elements")
             
-            return kept_elements, original_count, removed_count
+            return kept_elements, original_count, removed_count, target_p1_entity
             
         except json.JSONDecodeError as e:
             print(f"    ERROR: Failed to parse AI response: {e}")
             print(f"    Response preview: {response[:200] if response else 'empty'}...")
-            return elements, len(elements), 0
+            return elements, len(elements), 0, None
         except Exception as e:
             print(f"    ERROR: AI pruning failed: {e}")
-            return elements, len(elements), 0
+            return elements, len(elements), 0, None
     
-    def rationalize_structure_definition(self, sd_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Rationalize a single StructureDefinition: prune elements, then transform"""
+    def rationalize_structure_definition_p1(self, sd_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Rationalize a P1 StructureDefinition: prune elements, then create entity.
+        
+        Args:
+            sd_config: Config dict for this StructureDefinition
+            
+        Returns:
+            Rationalized entity dict, or None if failed
+        """
         
         file_path = sd_config.get('file', '')
         resource_name = sd_config.get('resource_name', '')
@@ -339,9 +500,9 @@ CRITICAL:
         
         original_count = len(elements)
         
-        # Prune elements with AI
-        kept_elements, original_count, removed_count = self.prune_elements_with_ai(
-            resource_name, ig_source, reasoning, elements
+        # Prune elements with AI (P1 - no p1_entities context)
+        kept_elements, original_count, removed_count, _ = self.prune_elements_with_ai(
+            resource_name, ig_source, reasoning, elements, p1_entities=None
         )
         
         # Transform kept elements to attributes
@@ -386,69 +547,36 @@ CRITICAL:
         
         return entity
     
-    def rationalize_value_set(self, vs_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Rationalize a ValueSet - no pruning, just transform"""
+    def process_p2_structure_definition(self, sd_config: Dict[str, Any], 
+                                        p1_entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Process a P2 StructureDefinition: prune elements and merge into P1 entity.
         
-        file_path = vs_config.get('file', '')
-        resource_name = vs_config.get('resource_name', '')
-        ig_source = vs_config.get('ig_source', '')
-        reasoning = vs_config.get('reasoning', '')
+        Args:
+            sd_config: Config dict for this StructureDefinition
+            p1_entities: List of P1 entities to potentially merge into
+            
+        Returns:
+            Dict with merge results: {target_entity, attributes_added, skipped_reason}
+        """
         
-        # Use file path directly from config
-        full_path = Path(file_path)
+        file_path = sd_config.get('file', '')
+        resource_name = sd_config.get('resource_name', '')
+        ig_source = sd_config.get('ig_source', '')
+        reasoning = sd_config.get('reasoning', '')
         
-        if not full_path.exists():
-            filename = vs_config.get('filename', '')
-            if filename:
-                for base in [Path('.'), Path('input/strd_fhir_ig')]:
-                    candidate = base / filename
-                    if candidate.exists():
-                        full_path = candidate
-                        break
-        
-        if not full_path.exists():
-            print(f"    Warning: File not found: {file_path}")
-            return None
-        
-        # Load ValueSet
-        with open(full_path, 'r', encoding='utf-8') as f:
-            vs_data = json.load(f)
-        
-        # Extract compose information
-        compose = vs_data.get('compose', {})
-        include = compose.get('include', [])
-        
-        # Build ValueSet in reference_data format (not entity format)
-        valueset = {
-            "name": resource_name,
-            "url": vs_data.get('url', ''),
-            "version": vs_data.get('version', ''),
-            "title": vs_data.get('title', ''),
-            "status": vs_data.get('status', ''),
-            "description": vs_data.get('description', ''),
-            "source_file": file_path,
-            "ig_source": ig_source,
-            "business_context": reasoning,
-            "compose": {
-                "include": include
-            }
+        result = {
+            "p2_structure": resource_name,
+            "target_entity": None,
+            "attributes_added": 0,
+            "skipped_reason": None
         }
         
-        return valueset
-    
-    def rationalize_code_system(self, cs_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Rationalize a CodeSystem - no pruning, just transform"""
-        
-        file_path = cs_config.get('file', '')
-        resource_name = cs_config.get('resource_name', '')
-        ig_source = cs_config.get('ig_source', '')
-        reasoning = cs_config.get('reasoning', '')
-        
         # Use file path directly from config
         full_path = Path(file_path)
         
         if not full_path.exists():
-            filename = cs_config.get('filename', '')
+            filename = sd_config.get('filename', '')
             if filename:
                 for base in [Path('.'), Path('input/strd_fhir_ig')]:
                     candidate = base / filename
@@ -458,43 +586,98 @@ CRITICAL:
         
         if not full_path.exists():
             print(f"    Warning: File not found: {file_path}")
-            return None
+            result["skipped_reason"] = "file_not_found"
+            return result
         
-        # Load CodeSystem
+        # Load StructureDefinition
         with open(full_path, 'r', encoding='utf-8') as f:
-            cs_data = json.load(f)
+            sd_data = json.load(f)
         
-        # Extract concepts
-        concepts = cs_data.get('concept', [])
+        # Extract snapshot elements
+        snapshot = sd_data.get('snapshot', {})
+        elements = snapshot.get('element', [])
         
-        # Simplify concepts for output
-        simple_concepts = []
-        for concept in concepts:
-            simple_concepts.append({
-                "code": concept.get('code', ''),
-                "display": concept.get('display', ''),
-                "definition": concept.get('definition', '')
+        if not elements:
+            print(f"    Warning: No snapshot elements in {resource_name}")
+            result["skipped_reason"] = "no_elements"
+            return result
+        
+        # Prune elements with AI (P2 - with p1_entities context)
+        kept_elements, original_count, removed_count, target_p1_entity = self.prune_elements_with_ai(
+            resource_name, ig_source, reasoning, elements, p1_entities=p1_entities
+        )
+        
+        # If no target entity or no elements, skip
+        if not target_p1_entity or not kept_elements:
+            result["skipped_reason"] = "no_matching_p1_entity" if not target_p1_entity else "no_relevant_elements"
+            return result
+        
+        # Find target P1 entity
+        target_entity = None
+        for entity in p1_entities:
+            if entity.get("entity_name") == target_p1_entity:
+                target_entity = entity
+                break
+        
+        if not target_entity:
+            print(f"    Warning: Target P1 entity '{target_p1_entity}' not found")
+            result["skipped_reason"] = f"target_not_found:{target_p1_entity}"
+            return result
+        
+        result["target_entity"] = target_p1_entity
+        
+        # Get existing attribute names to avoid duplicates
+        existing_attr_names = {
+            attr.get("attribute_name", "").lower() 
+            for attr in target_entity.get("attributes", [])
+        }
+        
+        # Transform and merge attributes
+        added_count = 0
+        for elem in kept_elements:
+            attr = self.transform_element_to_attribute(elem, resource_name)
+            attr["source_files"] = [file_path]
+            
+            # Mark as P2-sourced
+            attr["source_metadata"]["p2_source"] = resource_name
+            attr["source_metadata"]["p2_ig"] = ig_source
+            
+            # Check for duplicate
+            attr_name_lower = attr.get("attribute_name", "").lower()
+            if attr_name_lower not in existing_attr_names:
+                target_entity["attributes"].append(attr)
+                existing_attr_names.add(attr_name_lower)
+                added_count += 1
+        
+        result["attributes_added"] = added_count
+        
+        # Update entity metadata
+        if added_count > 0:
+            p2_notes = target_entity.get("ai_metadata", {}).get("p2_refinements", [])
+            p2_notes.append({
+                "p2_structure": resource_name,
+                "ig_source": ig_source,
+                "attributes_added": added_count
             })
+            if "ai_metadata" not in target_entity:
+                target_entity["ai_metadata"] = {}
+            target_entity["ai_metadata"]["p2_refinements"] = p2_notes
+            
+            # Update source_info files
+            if file_path not in target_entity.get("source_info", {}).get("files", []):
+                target_entity["source_info"]["files"].append(file_path)
         
-        # Build CodeSystem in reference_data format (not entity format)
-        codesystem = {
-            "name": resource_name,
-            "url": cs_data.get('url', ''),
-            "version": cs_data.get('version', ''),
-            "title": cs_data.get('title', ''),
-            "status": cs_data.get('status', ''),
-            "description": cs_data.get('description', ''),
-            "content": cs_data.get('content', ''),
-            "source_file": file_path,
-            "ig_source": ig_source,
-            "business_context": reasoning,
-            "concepts": simple_concepts
-        }
+        print(f"    ✓ Merged {added_count} attributes into {target_p1_entity}")
         
-        return codesystem
+        return result
     
     def run(self, output_dir: str) -> Optional[str]:
-        """Run rationalization, return output file path"""
+        """
+        Run rationalization, return output file path.
+        
+        Work Item 1: Skip VS/CS processing entirely
+        Work Item 2: Two-pass P1/P2 processing with P2 merge
+        """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
@@ -507,57 +690,61 @@ CRITICAL:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         domain_safe = self.cdm_domain.replace(' ', '_')
         
-        structure_entities = []
-        valueset_entities = []
-        codesystem_entities = []
+        # Work Item 2: Two-pass processing
+        p1_entities = []
+        p2_merge_results = []
         
-        # Process StructureDefinitions
-        if self.structure_definitions:
-            print(f"  Processing {len(self.structure_definitions)} StructureDefinitions...")
-            for sd_config in self.structure_definitions:
-                print(f"    Processing: {sd_config.get('resource_name', 'unknown')}")
-                entity = self.rationalize_structure_definition(sd_config)
+        # PASS 1: Process P1 StructureDefinitions (define entities + attributes)
+        if self.p1_structures:
+            print(f"  === PASS 1: Processing {len(self.p1_structures)} Priority 1 StructureDefinitions ===")
+            for sd_config in self.p1_structures:
+                print(f"    Processing [P1]: {sd_config.get('resource_name', 'unknown')}")
+                entity = self.rationalize_structure_definition_p1(sd_config)
                 if entity:
-                    structure_entities.append(entity)
+                    p1_entities.append(entity)
+            print(f"  ✓ Pass 1 complete: {len(p1_entities)} entities created")
         
-        # Process ValueSets (no pruning)
-        if self.value_sets:
-            print(f"  Processing {len(self.value_sets)} ValueSets...")
-            for vs_config in self.value_sets:
-                print(f"    Processing: {vs_config.get('resource_name', 'unknown')}")
-                entity = self.rationalize_value_set(vs_config)
-                if entity:
-                    valueset_entities.append(entity)
+        # PASS 2: Process P2 StructureDefinitions (merge attributes into P1 entities)
+        if self.p2_structures and p1_entities:
+            print(f"\n  === PASS 2: Processing {len(self.p2_structures)} Priority 2 StructureDefinitions ===")
+            print(f"  P1 entity targets: {[e.get('entity_name') for e in p1_entities]}")
+            
+            for sd_config in self.p2_structures:
+                print(f"    Processing [P2]: {sd_config.get('resource_name', 'unknown')}")
+                merge_result = self.process_p2_structure_definition(sd_config, p1_entities)
+                p2_merge_results.append(merge_result)
+            
+            # Summarize P2 results
+            merged_count = sum(1 for r in p2_merge_results if r.get("attributes_added", 0) > 0)
+            skipped_count = sum(1 for r in p2_merge_results if r.get("skipped_reason"))
+            total_attrs_added = sum(r.get("attributes_added", 0) for r in p2_merge_results)
+            
+            print(f"  ✓ Pass 2 complete: {merged_count} P2 structures merged, {skipped_count} skipped")
+            print(f"    Total P2 attributes added: {total_attrs_added}")
+        elif self.p2_structures and not p1_entities:
+            print(f"\n  ⚠️ Skipping {len(self.p2_structures)} P2 structures - no P1 entities to refine")
         
-        # Process CodeSystems (no pruning)
-        if self.code_systems:
-            print(f"  Processing {len(self.code_systems)} CodeSystems...")
-            for cs_config in self.code_systems:
-                print(f"    Processing: {cs_config.get('resource_name', 'unknown')}")
-                entity = self.rationalize_code_system(cs_config)
-                if entity:
-                    codesystem_entities.append(entity)
-        
-        if not structure_entities and not valueset_entities and not codesystem_entities:
+        if not p1_entities:
             print("  No FHIR entities generated")
             return None
         
-        # Build consolidated output in common format
+        # Work Item 1: No VS/CS processing - output simplified structure
         consolidated = {
             "rationalization_metadata": {
                 "source_type": "FHIR",
                 "cdm_domain": self.cdm_domain,
                 "cdm_classification": self.cdm_classification,
                 "rationalization_timestamp": datetime.now().isoformat(),
-                "entities_processed": len(structure_entities),
-                "value_sets_processed": len(valueset_entities),
-                "code_systems_processed": len(codesystem_entities)
+                "entities_processed": len(p1_entities),
+                "p1_structures_processed": len(self.p1_structures),
+                "p2_structures_processed": len(self.p2_structures),
+                "p2_merge_results": p2_merge_results,
+                "value_sets_skipped": self.value_set_count,
+                "code_systems_skipped": self.code_system_count,
+                "note": "VS/CS skipped - terminology enrichment handled in post-process via binding URLs"
             },
-            "entities": structure_entities,
-            "reference_data": {
-                "value_sets": valueset_entities,
-                "code_systems": codesystem_entities
-            }
+            "entities": p1_entities  # Only P1 entities (with P2 attributes merged in)
+            # No reference_data section - VS/CS loaded on-demand in post-process
         }
         
         output_file = output_path / f"rationalized_fhir_{domain_safe}_{timestamp}.json"
@@ -565,14 +752,12 @@ CRITICAL:
             json.dump(consolidated, f, indent=2)
         
         # Summary
-        sd_attrs = sum(len(e.get('attributes', [])) for e in structure_entities)
-        vs_count = sum(len(e.get('compose', {}).get('include', [])) for e in valueset_entities)
-        cs_concepts = sum(len(e.get('concepts', [])) for e in codesystem_entities)
+        total_attrs = sum(len(e.get('attributes', [])) for e in p1_entities)
         
         print(f"  ✓ Saved: {output_file.name}")
-        print(f"    Entities: {len(structure_entities)}, Attributes: {sd_attrs}")
-        print(f"    ValueSets: {len(valueset_entities)}")
-        print(f"    CodeSystems: {len(codesystem_entities)}, Concepts: {cs_concepts}")
+        print(f"    Entities: {len(p1_entities)} (P1 only, with P2 attributes merged)")
+        print(f"    Attributes: {total_attrs}")
+        print(f"    VS/CS: Skipped (post-process enrichment)")
         
         return str(output_file)
 

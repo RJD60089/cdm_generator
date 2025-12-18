@@ -4,6 +4,8 @@ Match file application for Full CDM.
 
 Applies match files to Full CDM with case-insensitive entity/attribute matching.
 
+Work Item 3: Added binding passthrough to source_lineage for terminology enrichment.
+
 Functions:
   - apply_match_files(): Merge all match files into Full CDM
 """
@@ -145,6 +147,10 @@ def apply_match_files(
                     # Get source attribute details
                     source_attr = source_attrs.get(source_attr_name.lower(), {})
                     
+                    # Work Item 3: Extract binding from source_metadata for terminology enrichment
+                    source_metadata = source_attr.get("source_metadata", {})
+                    binding = source_metadata.get("binding")
+                    
                     # Add to attribute source_lineage
                     attr_lineage = {
                         "source_entity": source_entity_name,
@@ -156,6 +162,11 @@ def apply_match_files(
                         "required": source_attr.get("required"),
                         "description": source_attr.get("description")
                     }
+                    
+                    # Work Item 3: Add binding if present (for post-process terminology enrichment)
+                    if binding:
+                        attr_lineage["binding"] = binding
+                    
                     cdm_attr["source_lineage"][source_type].append(attr_lineage)
                     
                     # Merge validation rules

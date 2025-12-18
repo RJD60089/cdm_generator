@@ -5,6 +5,8 @@ Handles:
 - Two-pass FHIR resource analysis (primary + references)
 - AI-based filename correction for missing files
 - Resource validation against available files
+
+Work Item 4: Added canonical_url capture for VS/CS entries (used in post-process terminology enrichment)
 """
 import json
 from pathlib import Path
@@ -326,7 +328,10 @@ Return ONLY valid JSON:"""
             return {}
     
     def _build_pass1_prompt(self, config: Dict) -> str:
-        """Build Pass 1 prompt for primary resource selection."""
+        """Build Pass 1 prompt for primary resource selection.
+        
+        Work Item 4: Added canonical_url to output format for VS/CS entries.
+        """
         cdm = config['cdm']
         
         # Load available file list
@@ -384,6 +389,12 @@ Based on your knowledge of FHIR as well as industry understanding of Pharmacy Be
       - If CDM excludes "plan hierarchy/identity" → do NOT include plan-level InsurancePlan profiles
    d. When uncertain whether a resource belongs to an excluded domain, EXCLUDE it.
 
+8. **Canonical URL for ValueSets and CodeSystems**
+   a. For ValueSet and CodeSystem files, include the canonical_url field.
+   b. This is the FHIR canonical URL (e.g., "http://hl7.org/fhir/us/davinci-drug-formulary/ValueSet/DrugTierVS")
+   c. The canonical_url is used downstream to link terminology to attribute bindings.
+   d. If you don't know the exact canonical URL, use the pattern: http://hl7.org/fhir/<ig-path>/<ResourceType>/<resource-name>
+
 # AVAILABLE FHIR FILES
 (Alphabetically sorted - scan to CodeSystem-*, StructureDefinition-*, or ValueSet-* section)
 
@@ -402,6 +413,24 @@ Respond with ONLY valid JSON:
       "ig_source": "US Drug Formulary",
       "priority": 1,
       "reasoning": "Primary formulary item resource."
+    }},
+    {{
+      "filename": "ValueSet-usdf-DrugTierVS.json",
+      "resource_name": "DrugTierVS",
+      "file_type": "ValueSet",
+      "ig_source": "US Drug Formulary",
+      "priority": 1,
+      "canonical_url": "http://hl7.org/fhir/us/davinci-drug-formulary/ValueSet/DrugTierVS",
+      "reasoning": "Drug tier value set for formulary tiering."
+    }},
+    {{
+      "filename": "CodeSystem-usdf-DrugTierCS.json",
+      "resource_name": "DrugTierCS",
+      "file_type": "CodeSystem",
+      "ig_source": "US Drug Formulary",
+      "priority": 1,
+      "canonical_url": "http://hl7.org/fhir/us/davinci-drug-formulary/CodeSystem/usdf-DrugTierCS",
+      "reasoning": "Drug tier code system defining tier codes."
     }},
     {{
       "filename": "NOMATCH:StructureDefinition-usdf-CoveragePlan.json",
@@ -427,6 +456,7 @@ Respond with ONLY valid JSON:
 - STRICTLY EXCLUDE resources matching excluded domains in CDM description.
 - Assign priority (1=primary, 2=alternate) for duplicate resources.
 - Focus on resources for CDM entities and attributes.
-- Include supporting ValueSets and CodeSystems.
+- Include supporting ValueSets and CodeSystems WITH canonical_url field.
+- canonical_url is REQUIRED for ValueSet and CodeSystem entries.
 
 Respond with JSON only:"""
