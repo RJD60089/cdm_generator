@@ -30,7 +30,8 @@ def build_prompt(
     guardrails_data: Optional[Dict] = None,
     glue_data: Optional[Dict] = None,
     fhir_data: Optional[Dict] = None,
-    ncpdp_data: Optional[Dict] = None
+    ncpdp_data: Optional[Dict] = None,
+    edw_data: Optional[Dict] = None
 ) -> str:
     """
     Build prompt to generate CDM from config and rationalized sources.
@@ -84,6 +85,7 @@ def build_prompt(
     glue_section = format_source(glue_data, "Glue")
     fhir_section = format_source(fhir_data, "FHIR")
     ncpdp_section = format_source(ncpdp_data, "NCPDP")
+    edw_section = format_source(edw_data, "EDW")
     
     # Helper to get entities from either key
     def get_entities(data: Optional[Dict]) -> list:
@@ -96,6 +98,7 @@ def build_prompt(
     glue_count = len(get_entities(glue_data))
     fhir_count = len(get_entities(fhir_data))
     ncpdp_count = len(get_entities(ncpdp_data))
+    edw_count = len(get_entities(edw_data))
     
     prompt = f"""You are a senior data architect responsible for generating a Conceptual Data Model (CDM) for the {config.cdm.domain} domain.
 
@@ -146,7 +149,7 @@ CRITICAL PRINCIPLES
 ** When multiple standard resources represent the same concept at different technical levels (e.g., routing from NCPDP T and routing from internal files), unify them unless both levels are explicitly required for conceptual modeling.
 
 =============================================================================
-SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count} entities)
+SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count + edw_count} entities)
 =============================================================================
 
 These define YOUR actual business entities and hierarchy. Use these as the PRIMARY source for identifying Core entities.
@@ -160,6 +163,11 @@ Business-defined entities from internal APIs and governance:
 Operational entities from data pipeline/warehouse:
 
 {glue_section}
+
+## EDW ({edw_count} entities)
+Enterprise data warehouse tables — actual stored business data:
+
+{edw_section}
 
 =============================================================================
 SOURCE FILES - INDUSTRY STANDARDS ({fhir_count + ncpdp_count} entities)
@@ -364,11 +372,13 @@ def run_step3a(
     glue_file = find_latest_rationalized(rationalized_dir, f"rationalized_glue_{domain_safe}")
     fhir_file = find_latest_rationalized(rationalized_dir, f"rationalized_fhir_{domain_safe}")
     ncpdp_file = find_latest_rationalized(rationalized_dir, f"rationalized_ncpdp_{domain_safe}")
-    
+    edw_file = find_latest_rationalized(rationalized_dir, f"rationalized_edw_entities_{domain_safe}")
+
     guardrails_data = load_rationalized_file(guardrails_file)
     glue_data = load_rationalized_file(glue_file)
     fhir_data = load_rationalized_file(fhir_file)
     ncpdp_data = load_rationalized_file(ncpdp_file)
+    edw_data = load_rationalized_file(edw_file)
     
     # Helper to get entities from either key format
     def get_entity_count(data):
@@ -381,14 +391,16 @@ def run_step3a(
     glue_count = get_entity_count(glue_data)
     fhir_count = get_entity_count(fhir_data)
     ncpdp_count = get_entity_count(ncpdp_data)
+    edw_count = get_entity_count(edw_data)
     
     print(f"   📊 Sources loaded:")
     print(f"      Guardrails: {gr_count} entities" + (f" ({guardrails_file.name})" if guardrails_file else " (not found)"))
     print(f"      Glue:       {glue_count} entities" + (f" ({glue_file.name})" if glue_file else " (not found)"))
+    print(f"      EDW:        {edw_count} entities" + (f" ({edw_file.name})" if edw_file else " (not found)"))
     print(f"      FHIR:       {fhir_count} entities" + (f" ({fhir_file.name})" if fhir_file else " (not found)"))
     print(f"      NCPDP:      {ncpdp_count} entities" + (f" ({ncpdp_file.name})" if ncpdp_file else " (not found)"))
     
-    total_entities = gr_count + glue_count + fhir_count + ncpdp_count
+    total_entities = gr_count + glue_count + fhir_count + ncpdp_count + edw_count
     if total_entities == 0:
         print(f"   ⚠️  WARNING: No rationalized sources found. Run Step 1 first.")
         if not dry_run:
@@ -401,7 +413,8 @@ def run_step3a(
         guardrails_data=guardrails_data,
         glue_data=glue_data,
         fhir_data=fhir_data,
-        ncpdp_data=ncpdp_data
+        ncpdp_data=ncpdp_data,
+        edw_data=edw_data
     )
     
     # Ensure output directory exists

@@ -75,20 +75,31 @@ def create_summary_tab(
     
     coverage = extractor.get_source_coverage_summary()
     
-    # Priority order header
+    # Build dynamic source list from coverage data, in preferred order
+    _PREFERRED_ORDER = ["edw", "guardrails", "glue", "ncpdp", "fhir"]
+    _UPPER_LABELS = {"ncpdp", "fhir", "edw"}
+
+    def _source_label(s: str) -> str:
+        return s.upper() if s.lower() in _UPPER_LABELS else s.title()
+
+    present_sources = [s for s in _PREFERRED_ORDER if s in coverage]
+    extras = sorted(s for s in coverage if s not in _PREFERRED_ORDER)
+    all_sources = present_sources + extras
+
+    # Priority order header (dynamic)
+    survivorship = " → ".join(_source_label(s) for s in all_sources)
     ws.cell(row=row, column=1, value="Source Priority (Survivorship):").font = ExcelStyles.BOLD_FONT
-    ws.cell(row=row, column=2, value="Guardrails → Glue → NCPDP → FHIR")
+    ws.cell(row=row, column=2, value=survivorship)
     row += 1
-    
+
     ws.cell(row=row, column=1, value="").font = ExcelStyles.BOLD_FONT  # spacer
     row += 1
-    
+
     # Coverage counts (in priority order)
-    for source in ["guardrails", "glue", "ncpdp", "fhir"]:
+    for source in all_sources:
         count = coverage.get(source, 0)
-        label = source.upper() if source in ["ncpdp", "fhir"] else source.title()
-        ws.cell(row=row, column=1, value=f"  {label}").font = ExcelStyles.BOLD_FONT
-        ws.cell(row=row, column=2, value=f"{count} entities")
+        ws.cell(row=row, column=1, value=f"  {_source_label(source)}").font = ExcelStyles.BOLD_FONT
+        ws.cell(row=row, column=2, value=f"{count} attributes mapped")
         row += 1
     
     row += 1

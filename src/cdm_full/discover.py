@@ -30,7 +30,7 @@ def discover_sources(rationalized_dir: Path, domain: str) -> Dict[str, Path]:
     
     pattern = "rationalized_*.json"
     for filepath in rationalized_dir.glob(pattern):
-        filename = filepath.stem  # rationalized_fhir_Utilization_Management_20251201_134436
+        filename = filepath.stem
         parts = filename.split('_')
         
         # Expected: rationalized_{source}_{domain...}_{date}_{time}
@@ -38,6 +38,12 @@ def discover_sources(rationalized_dir: Path, domain: str) -> Dict[str, Path]:
         # Last two parts are always date (YYYYMMDD) and time (HHMMSS)
         if len(parts) >= 5 and parts[0] == 'rationalized':
             source_type = parts[1].lower()
+
+            # Skip the EDW entities-only file — it is for Step 3 (Foundational CDM).
+            # Step 6 (Build Full CDM) must only see the full attributes file whose
+            # name is rationalized_edw_{domain}_{ts}.json (no "entities" segment).
+            if source_type == 'edw' and len(parts) >= 3 and parts[2].lower() == 'entities':
+                continue
             
             # Reconstruct domain from parts between source_type and timestamp
             # parts[2:-2] = domain parts, parts[-2:] = date, time

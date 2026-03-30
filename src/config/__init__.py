@@ -42,6 +42,7 @@ from .config_generator import ConfigGenerator
 from .config_gen_fhir import FHIRConfigGenerator
 from .config_gen_ncpdp import NCPDPConfigGenerator
 from .config_gen_glue import GlueConfigGenerator
+from .config_gen_edw import EDWConfigGenerator
 
 __all__ = [
     # Utilities
@@ -61,4 +62,5 @@ __all__ = [
     'FHIRConfigGenerator',
     'NCPDPConfigGenerator',
     'GlueConfigGenerator',
+    'EDWConfigGenerator',
 ]

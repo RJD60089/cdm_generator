@@ -39,6 +39,7 @@ class AppConfig:
     ncpdp_general_standards: List[Dict[str, Any]] = field(default_factory=list)
     ncpdp_script_standards: List[Dict[str, Any]] = field(default_factory=list)
     naming_standard: List[str] = field(default_factory=list)
+    edw: List[str] = field(default_factory=list)
     
     # Thresholds
     entity_threshold: float = 0.006
@@ -107,6 +108,10 @@ class AppConfig:
     def has_glue(self) -> bool:
         """Check if glue schemas are configured"""
         return len(self.glue) > 0
+
+    def has_edw(self) -> bool:
+        """Check if EDW entities are configured"""
+        return len(self.edw) > 0
     
     def get_fhir_by_type(self, file_type: str) -> List[Dict[str, Any]]:
         """Get FHIR IGs filtered by file_type (StructureDefinition, ValueSet, CodeSystem)"""
@@ -179,6 +184,7 @@ def load_config(config_path: str) -> AppConfig:
             ncpdp_general_standards=input_files.get('ncpdp_general_standards', []),
             ncpdp_script_standards=input_files.get('ncpdp_script_standards', []),
             naming_standard=input_files.get('naming_standard', []),
+            edw=input_files.get('edw', []),
             entity_threshold=data.get('thresholds', {}).get('entity_threshold', 0.006),
             attribute_threshold=data.get('thresholds', {}).get('attribute_threshold', 0.004),
             metadata=data.get('metadata', {})

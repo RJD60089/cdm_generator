@@ -39,6 +39,8 @@ class AttributeDetail:
     business_rules: List[str]
     validation_rules: List[str]
     source_lineage: Dict[str, List[Dict]]
+    ncpdp_field_codes: List[str] = field(default_factory=list)
+    edw_field_codes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -110,14 +112,9 @@ class CDMExtractor:
                     "to_column": rel.get("to_column", rel.get("fk", ""))
                 })
             
-            # Source coverage
+            # Source coverage - dynamic, picks up any source type in the CDM
             lineage = entity.get("source_lineage", {})
-            coverage = {
-                "guardrails": bool(lineage.get("guardrails")),
-                "glue": bool(lineage.get("glue")),
-                "ncpdp": bool(lineage.get("ncpdp")),
-                "fhir": bool(lineage.get("fhir"))
-            }
+            coverage = {src: bool(entries) for src, entries in lineage.items()}
             
             results.append(EntitySummary(
                 name=entity.get("entity_name", ""),
@@ -164,7 +161,9 @@ class CDMExtractor:
                     is_phi=attr.get("is_phi", False),
                     business_rules=business_rules,
                     validation_rules=validation_rules,
-                    source_lineage=attr.get("source_lineage", {})
+                    source_lineage=attr.get("source_lineage", {}),
+                    ncpdp_field_codes=attr.get("ncpdp_field_codes", []),
+                    edw_field_codes=attr.get("edw_field_codes", [])
                 ))
         return results
     
@@ -192,13 +191,15 @@ class CDMExtractor:
         return None
     
     def get_source_coverage_summary(self) -> Dict[str, int]:
-        """Count entities per source type."""
-        coverage = {"guardrails": 0, "glue": 0, "ncpdp": 0, "fhir": 0}
+        """Count attributes mapped per source type - dynamic, no hardcoded source list."""
+        coverage: Dict[str, int] = {}
         for entity in self._entities:
-            lineage = entity.get("source_lineage", {})
-            for src in coverage:
-                if lineage.get(src):
-                    coverage[src] += 1
+            for attr in entity.get("attributes", []):
+                for src, mappings in attr.get("source_lineage", {}).items():
+                    if mappings:
+                        coverage[src] = coverage.get(src, 0) + (
+                            len(mappings) if isinstance(mappings, list) else 1
+                        )
         return coverage
     
     def get_attributes_with_rules(self) -> List[AttributeDetail]:

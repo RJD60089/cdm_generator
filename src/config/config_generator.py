@@ -29,6 +29,7 @@ from .config_gen_core import ConfigGeneratorBase, prompt_user_choice
 from .config_gen_fhir import FHIRConfigGenerator
 from .config_gen_ncpdp import NCPDPConfigGenerator
 from .config_gen_glue import GlueConfigGenerator
+from .config_gen_edw import EDWConfigGenerator
 
 
 class ConfigGenerator(ConfigGeneratorBase):
@@ -47,6 +48,7 @@ class ConfigGenerator(ConfigGeneratorBase):
         self.fhir_gen = FHIRConfigGenerator(cdm_name, llm_client)
         self.ncpdp_gen = NCPDPConfigGenerator(cdm_name, llm_client)
         self.glue_gen = GlueConfigGenerator(cdm_name, llm_client)
+        self.edw_gen  = EDWConfigGenerator(cdm_name, llm_client)
     
     def run(self, dry_run: bool = False) -> Optional[Path]:
         """Execute config generation workflow.
@@ -101,10 +103,15 @@ class ConfigGenerator(ConfigGeneratorBase):
             glue_result = self.glue_gen.run_analysis(source_config, dry_run)
             # Note: Glue generator prints its own skip messages
         
+        # EDW Analysis
+        edw_result = None
+        if prompt_user_choice("\n   Run EDW entity selection?", default="Y"):
+            edw_result = self.edw_gen.run_analysis(source_config, dry_run)
+
         # Step 4: Build updated config (merge changes into source)
         updated_config = self._merge_updates(
             source_config, fhir_result, ncpdp_result, glue_result,
-            guardrails_files, ddl_files
+            guardrails_files, ddl_files, edw_result
         )
         
         # Step 5: Save with new timestamp
@@ -161,12 +168,12 @@ class ConfigGenerator(ConfigGeneratorBase):
         ncpdp_result: Optional[Dict],
         glue_result: Optional[Dict],
         guardrails_files: List[str],
-        ddl_files: List[str]
+        ddl_files: List[str],
+        edw_result: Optional[Dict] = None
     ) -> Dict:
         """Merge analysis results into source config.
         
         Only updates sections that were analyzed. Preserves all other fields.
-        Auto-discovered guardrails and DDL files always override config values.
         
         Args:
             source_config: Original config (source of truth for unchanged fields)
@@ -187,7 +194,7 @@ class ConfigGenerator(ConfigGeneratorBase):
         if 'input_files' not in config:
             config['input_files'] = {}
         
-        # Always update guardrails and DDL from auto-discovery (filename only)
+        # Always update guardrails and DDL from auto-discovery
         config['input_files']['guardrails'] = guardrails_files
         config['input_files']['ddl'] = ddl_files
         
@@ -215,6 +222,16 @@ class ConfigGenerator(ConfigGeneratorBase):
         # Update Glue if analyzed
         if glue_result and 'glue' in glue_result:
             config['input_files']['glue'] = glue_result['glue']
+
+        # Update EDW if analyzed
+        if edw_result and 'edw' in edw_result:
+            config['input_files']['edw'] = edw_result['edw']
+            if edw_result.get('domain_assessment'):
+                if 'metadata' not in config:
+                    config['metadata'] = {}
+                if 'ai_analysis' not in config['metadata']:
+                    config['metadata']['ai_analysis'] = {}
+                config['metadata']['ai_analysis']['edw_assessment'] = edw_result['domain_assessment']
         
         # Update metadata timestamp
         if 'metadata' not in config:
@@ -224,22 +241,15 @@ class ConfigGenerator(ConfigGeneratorBase):
         
         return config
     
+    
+
     def _build_fhir_file_entries(self, fhir_result: Dict) -> List[Dict]:
-        """Build FHIR file entries with full paths.
-        
-        Args:
-            fhir_result: FHIR analysis results
-            
-        Returns:
-            List of file entry dicts
-        """
+        """Build FHIR file entries with full paths."""
         entries = []
         fhir_dir = config_utils.get_standards_fhir_dir()
         
         for resource in fhir_result.get('fhir_igs', []):
             filename = resource['filename']
-            
-            # Find actual file
             filepath = config_utils.find_file_recursive(fhir_dir, filename)
             
             if filepath:
@@ -254,7 +264,6 @@ class ConfigGenerator(ConfigGeneratorBase):
                     "reasoning": resource['reasoning']
                 })
             else:
-                # File not found - include anyway for manual fix
                 entries.append({
                     "file": f"NOT_FOUND/{filename}",
                     "filename": filename,
@@ -266,7 +275,7 @@ class ConfigGenerator(ConfigGeneratorBase):
                 })
         
         return entries
-    
+
     def _print_summary(self, config: Dict, filepath: Path):
         """Print generation summary.
         
@@ -287,6 +296,7 @@ class ConfigGenerator(ConfigGeneratorBase):
         print(f"   DDL files: {len(input_files.get('ddl', []))}")
         print(f"   NCPDP General: {len(input_files.get('ncpdp_general_standards', []))}")
         print(f"   NCPDP SCRIPT: {len(input_files.get('ncpdp_script_standards', []))}")
+        print(f"   EDW entities: {len(input_files.get('edw', []))}")
         
         print(f"\n🚀 Next Steps:")
         print(f"   1. Review config: {filepath}")

@@ -2,6 +2,7 @@
 """Generate Data Dictionary tab for Excel CDM."""
 
 from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter
 from src.artifacts.common.cdm_extractor import CDMExtractor
 from src.artifacts.common.styles import ExcelStyles
@@ -10,39 +11,57 @@ from src.artifacts.common.styles import ExcelStyles
 def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
     """
     Create the Data Dictionary tab with all attributes.
-    
-    Columns:
-    - Entity, Attribute, Business Definition, Data Type, Size
-    - Nullable, Is PK, Is FK, FK Reference, CDE Flag
-    - Classification, PII, PHI, Authoritative Source
+
+    Columns (always present):
+      Entity, Attribute, Business Definition, Data Type, Size,
+      Nullable, Is PK, Is FK, FK Reference, Classification, PII, PHI, Rematch
+
+    Columns (conditional — only when field code enrichment has been run):
+      NCPDP Field Code, EDW F-Code
     """
-    
+
     ws = wb.create_sheet("Data_Dictionary")
-    
-    # Headers
+
+    attributes = extractor.get_all_attributes()
+
+    # Only add field code columns when at least one attribute was enriched.
+    # Appears automatically after postprocess_field_codes has run — absent otherwise.
+    # No domain checks needed anywhere.
+    has_field_codes = any(
+        a.ncpdp_field_codes or a.edw_field_codes for a in attributes
+    )
+
+    # --- Headers ---
     headers = [
         "Entity", "Attribute", "Business Definition", "Data Type", "Size",
-        "Nullable", "Is PK", "Is FK", "FK Reference", 
-        "Classification", "PII", "PHI"
+        "Nullable", "Is PK", "Is FK", "FK Reference",
+        "Classification", "PII", "PHI", "Rematch",
     ]
-    
+    if has_field_codes:
+        headers += ["NCPDP Field Code", "EDW F-Code"]
+
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
         ExcelStyles.apply_header_style(cell)
-    
-    # Data rows
-    attributes = extractor.get_all_attributes()
-    
+
+    # --- Data rows ---
     for row_idx, attr in enumerate(attributes, 2):
         is_alt = row_idx % 2 == 0
-        
+
         # Size display
         size = ""
         if attr.max_length:
             size = str(attr.max_length)
         elif attr.precision:
             size = f"{attr.precision},{attr.scale or 0}"
-        
+
+        # Rematch flag — True if any lineage entry has rematch=True
+        is_rematch = any(
+            mapping.get("rematch") is True
+            for mappings in attr.source_lineage.values()
+            for mapping in (mappings if isinstance(mappings, list) else [])
+        )
+
         row_data = [
             attr.entity_name,
             attr.attribute_name,
@@ -55,21 +74,33 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
             attr.fk_to or "",
             attr.classification or "",
             "Y" if attr.is_pii else "",
-            "Y" if attr.is_phi else ""
+            "Y" if attr.is_phi else "",
+            "R" if is_rematch else "",
         ]
-        
+
+        if has_field_codes:
+            row_data += [
+                "; ".join(attr.ncpdp_field_codes) if attr.ncpdp_field_codes else "",
+                "; ".join(attr.edw_field_codes)   if attr.edw_field_codes   else "",
+            ]
+
         for col, value in enumerate(row_data, 1):
             cell = ws.cell(row=row_idx, column=col, value=value)
             ExcelStyles.apply_body_style(cell, is_alt)
-            
-            # Highlight PKs and FKs
-            if col == 2:  # Attribute column
+
+            # Highlight PKs and FKs on attribute column
+            if col == 2:
                 if attr.pk:
                     ExcelStyles.apply_pk_style(cell)
                 elif attr.fk_to:
                     ExcelStyles.apply_fk_style(cell)
-    
-    # Column widths
+
+            # Highlight rematch flag cell in amber
+            if col == 13 and is_rematch:
+                cell.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+                cell.font = Font(bold=True, color="7D6608")
+
+    # --- Column widths ---
     widths = {
         "A": 25,  # Entity
         "B": 30,  # Attribute
@@ -82,12 +113,16 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
         "I": 35,  # FK Reference
         "J": 15,  # Classification
         "K": 8,   # PII
-        "L": 8    # PHI
+        "L": 8,   # PHI
+        "M": 10,  # Rematch
     }
+    if has_field_codes:
+        widths["N"] = 20  # NCPDP Field Code
+        widths["O"] = 20  # EDW F-Code
+
     ExcelStyles.set_column_widths(ws, widths)
-    
-    # Freeze header row
+
+    # --- Freeze + filter ---
     ws.freeze_panes = "A2"
-    
-    # Auto-filter
-    ws.auto_filter.ref = f"A1:L{len(attributes) + 1}"
+    last_col = get_column_letter(len(headers))
+    ws.auto_filter.ref = f"A1:{last_col}{len(attributes) + 1}"

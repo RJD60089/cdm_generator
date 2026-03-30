@@ -137,6 +137,46 @@ def list_ddl_files(cdm_name: str) -> List[str]:
     return [f.name for f in sorted(ddl_dir.glob("*.sql"))]
 
 
+def list_edw_entities(cdm_name: str) -> List[str]:
+    """Get EDW entity list for a CDM domain from the catalog index.
+
+    Reads input/edw_catalog/edw_catalog_index.json and returns the entity
+    names assigned to this CDM domain. Returns empty list if index not found
+    or domain has no entries.
+
+    Args:
+        cdm_name: CDM name (e.g., 'plan and benefit', 'formulary')
+
+    Returns:
+        Sorted list of entity ID strings (e.g., ['CARRIER', 'GROUPS', ...])
+    """
+    index_path = get_input_dir() / "edw_catalog" / "edw_catalog_index.json"
+
+    if not index_path.exists():
+        return []
+
+    try:
+        data = load_json_file(index_path)
+    except Exception:
+        return []
+
+    # Normalise CDM name to snake_case for index lookup
+    domain_key = safe_cdm_name(cdm_name)
+
+    entities_by_domain = data.get("entities_by_domain", {})
+
+    # Direct match
+    if domain_key in entities_by_domain:
+        return sorted(entities_by_domain[domain_key])
+
+    # Partial match fallback
+    for key, entities in entities_by_domain.items():
+        if domain_key in key or key in domain_key:
+            return sorted(entities)
+
+    return []
+
+
 def find_latest_config(cdm_name: str) -> Optional[Path]:
     """Find latest timestamped config file for a CDM.
     

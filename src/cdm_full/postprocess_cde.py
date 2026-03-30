@@ -38,8 +38,8 @@ FULL CDM (includes entities, attributes, descriptions, business rules, relations
 A data element is a CDE if it meets ONE OR MORE of these criteria:
 
 1. SECURITY-SENSITIVE DATA
-   - PHI (Protected Health Information under HIPAA) - check is_phi flag
-   - PII (Personally Identifiable Information) - check is_pii flag
+   - PHI (Protected Health Information under HIPAA) - check is_phi flag, PHI alone does not determine a CDE, only an indicator
+   - PII (Personally Identifiable Information) - check is_pii flag,  PII alone does not determine a CDE, only an indicator
    - Confidential financial data (pricing, costs, rates, fees, payment amounts)
    - Confidential business references (contract terms, discount rates, proprietary codes)
 
@@ -50,7 +50,7 @@ A data element is a CDE if it meets ONE OR MORE of these criteria:
 
 === ENTITY SCOPE ===
 
-ONLY select CDEs from entities with classification="Core".
+ONLY select CDEs from entities with classification="Core".  If no classification value, assume Core
 Do NOT select CDEs from:
 - Reference entities (lookup/code tables like AccountType, ObjectStatus)
 - Junction entities (M:M relationship tables like GroupPlanAssignment)
