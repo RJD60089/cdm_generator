@@ -18,10 +18,10 @@ MODEL_OPTIONS = {
         "api_key": lambda: os.getenv("OPENAI_API_KEY"),
         "base_url": lambda: os.getenv("OPENAI_BASE_URL")
     },
-    "gpt-5.3-codex": {
-        "name": "gpt-5.3-codex (OpenAI - 400k context)",
+    "gpt-5.4": {
+        "name": "gpt-5.4 (OpenAI - 400k context)",
         "provider": "openai",
-        "model": os.getenv("OPENAI_MODEL_5_3_CODEX", "gpt-5.3-codex"),
+        "model": os.getenv("OPENAI_MODEL_5_4", "gpt-5.4"),
         "api_key": lambda: os.getenv("OPENAI_API_KEY"),
         "base_url": lambda: os.getenv("OPENAI_BASE_URL")
     },
@@ -64,26 +64,26 @@ def select_model() -> str:
         Selected model key (e.g., "gpt-5", "local-70b")
     """
     print("\nSelect model:")
-    print("  1. gpt-5 (OpenAI - best reasoning) [DEFAULT]")
-    print("  2. gpt-5.3-codex (OpenAI - 400k context)")
+    print("  1. gpt-5 (OpenAI - best reasoning)")
+    print("  2. gpt-5.4 (OpenAI - 400k context) [DEFAULT]")
     print("  3. gpt-4.1 (OpenAI - large context)")
     print("  4. local-70b (llama.cpp - Llama 3.3 70B)")
     print("  5. local-32b (llama.cpp - QWEN3 32B)")
     print("  6. local-8b (vLLM - Llama 3.1 8B)")
     
-    choice = input("Choice (1-6) [1]: ").strip()
+    choice = input("Choice (1-6) [2]: ").strip()
     
     model_map = {
         "1": "gpt-5",
-        "2": "gpt-5.3-codex",
+        "2": "gpt-5.4",
         "3": "gpt-4.1",
         "4": "local-70b",
         "5": "local-32b",
         "6": "local-8b",
-        "": "gpt-5"  # Default
+        "": "gpt-5.4"  # Default
     }
     
-    selected = model_map.get(choice, "gpt-5")
+    selected = model_map.get(choice, "gpt-5.4")
     config = MODEL_OPTIONS[selected]
     
     print(f"Selected: {config['name']}")
@@ -181,7 +181,7 @@ def estimate_cost(model_key: str, input_tokens: int, output_tokens: int) -> floa
     # Rough pricing estimates (as of 2025, subject to change)
     pricing = {
         "gpt-5": {"input": 0.01, "output": 0.03},
-        "gpt-5.3-codex": {"input": 0.01, "output": 0.03},  # per 1K tokens (estimated, update when known)
+        "gpt-5.4": {"input": 0.01, "output": 0.03},  # per 1K tokens (estimated, update when known)
         "gpt-4.1": {"input": 0.005, "output": 0.015},
         "local-70b": {"input": 0.0, "output": 0.0},  # Free (local)
         "local-32b": {"input": 0.0, "output": 0.0},  # Free (local)

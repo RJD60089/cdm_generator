@@ -233,6 +233,18 @@ class ConfigGenerator(ConfigGeneratorBase):
                     config['metadata']['ai_analysis'] = {}
                 config['metadata']['ai_analysis']['edw_assessment'] = edw_result['domain_assessment']
         
+        # Ensure output section is populated
+        if 'output' not in config:
+            config['output'] = {}
+        if not config['output'].get('directory'):
+            config['output']['directory'] = f"output/{self.safe_name}"
+            print(f"   ⚠️  output.directory was missing — setting to: {config['output']['directory']} (will be saved to config)")
+        if not config['output'].get('filename'):
+            domain = config.get('cdm', {}).get('domain', self.safe_name)
+            safe_domain = domain.replace(' ', '_').replace('/', '_')
+            config['output']['filename'] = f"{safe_domain}_CDM.xlsx"
+            print(f"   ⚠️  output.filename was missing — setting to: {config['output']['filename']} (will be saved to config)")
+        
         # Update metadata timestamp
         if 'metadata' not in config:
             config['metadata'] = {}

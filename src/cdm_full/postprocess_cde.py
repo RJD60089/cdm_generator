@@ -4,11 +4,14 @@ Post-processing: Critical Data Element (CDE) Identification
 
 Identifies Critical Data Elements in the CDM using AI with full CDM context.
 
-CDE Definition (per analyst review):
-1. SECURITY-SENSITIVE: PHI, PII, confidential financial/business data
-2. ESSENTIAL FOR PROCESSING: Minimal fields to complete transaction "with paper and pencil"
+CDE Definition ("Front Page Test"):
+A data element whose exposure, corruption, or loss would cause the most severe
+organizational consequences — financial penalties, legal liability, reputational
+damage, or loss of business credibility. CDEs are rare by definition.
 
-CDEs are NOT just any important field - they require extra security scrutiny and governance.
+CDEs are NOT operationally important fields, NOT all PHI/PII, and NOT any field
+that is merely sensitive. They are the subset whose compromise creates outsized,
+headline-level harm.
 
 Run after Full CDM is built in Step 6 (and after sensitivity analysis).
 """
@@ -26,79 +29,147 @@ from src.core.llm_client import LLMClient
 # PROMPT TEMPLATE
 # =============================================================================
 
-CDE_IDENTIFICATION_PROMPT = """You are a data governance expert identifying Critical Data Elements (CDEs) for a Pharmacy Benefit Management (PBM) Canonical Data Model.
+CDE_IDENTIFICATION_PROMPT = """You are a data governance expert identifying \
+Critical Data Elements (CDEs) for a Pharmacy Benefit Management (PBM) \
+Canonical Data Model.
 
-IMPORTANT: CDEs require MORE security scrutiny and governance than regular data elements. This is a selective list, not comprehensive.
+IMPORTANT DEFINITION — THE "FRONT PAGE TEST":
+A Critical Data Element is a data element that, if exposed, corrupted, or \
+lost, would cause the MOST SEVERE consequences to the organization in terms of:
+  - Financial cost (fines, penalties, lawsuits, remediation)
+  - Legal/regulatory liability (HIPAA violations, breach notification \
+obligations, regulatory action)
+  - Reputational damage (public embarrassment, loss of client/member trust)
+  - Business credibility (loss of contracts, market position, partner \
+confidence)
 
-FULL CDM (includes entities, attributes, descriptions, business rules, relationships, PHI/PII flags):
+Apply the "New York Times front page" test: if this specific data element \
+appeared in a headline breach story, would it cause significant organizational \
+harm? Only select elements where the answer is clearly YES.
+
+CDEs are the WORST OF THE WORST — not merely important, not merely sensitive, \
+but the elements whose compromise would be most damaging. CDEs are rare by \
+definition. If your list feels long, your threshold is too low.
+
+FULL CDM (includes entities, attributes, descriptions, business rules, \
+relationships, PHI/PII flags):
 {cdm_json}
 
-=== CDE SELECTION CRITERIA ===
+=== SELECTION GUIDANCE ===
 
-A data element is a CDE if it meets ONE OR MORE of these criteria:
+PII, PHI, and operational flags in the CDM are INPUTS to your judgment, not \
+automatic qualifiers. Most PHI fields are sensitive but routine. A CDE is the \
+subset where exposure creates outsized harm:
 
-1. SECURITY-SENSITIVE DATA
-   - PHI (Protected Health Information under HIPAA) - check is_phi flag, PHI alone does not determine a CDE, only an indicator
-   - PII (Personally Identifiable Information) - check is_pii flag,  PII alone does not determine a CDE, only an indicator
-   - Confidential financial data (pricing, costs, rates, fees, payment amounts)
-   - Confidential business references (contract terms, discount rates, proprietary codes)
-
-2. ESSENTIAL FOR END-TO-END PROCESSING
-   - The minimal set of fields required to complete a business transaction "with paper and pencil"
-   - Example: To process a pharmacy claim you minimally need: member ID, drug (NDC), prescriber (NPI), pharmacy (NPI), quantity, date of service
-   - If this field is missing or wrong, the transaction cannot complete
+- DIRECT MEMBER IDENTIFIERS that enable identity theft or HIPAA breach \
+(e.g., SSN, full name + DOB + address combination, Member ID paired with \
+clinical data)
+- CLINICAL DATA that reveals conditions, diagnoses, or treatment details — \
+exposure is deeply personal and triggers HIPAA breach notification
+- FINANCIAL DATA whose exposure reveals proprietary pricing, contractual \
+terms, or payment amounts that would damage competitive position or client \
+relationships
+- CREDENTIALS OR KEYS that grant unauthorized system access or enable fraud \
+at scale
+- CREDIBILITY-CRITICAL DATA whose corruption or exposure would undermine \
+organizational trustworthiness — data that clients, regulators, or partners \
+rely on as authoritative (e.g., accreditation identifiers, contract-governing \
+codes, benefit configuration that determines member out-of-pocket costs)
 
 === ENTITY SCOPE ===
 
-ONLY select CDEs from entities with classification="Core".  If no classification value, assume Core
-Do NOT select CDEs from:
-- Reference entities (lookup/code tables like AccountType, ObjectStatus)
-- Junction entities (M:M relationship tables like GroupPlanAssignment)
+ONLY select CDEs from entities with classification="Core".
+If no classification value, assume Core.
+Do NOT select from Reference or Junction entities.
 
 === WHAT IS NOT A CDE ===
 
 Do NOT select fields just because they are:
-- Primary keys or foreign keys (unless they are also business identifiers like BIN, PCN, NPI, NDC)
-- Status fields or flags
+- PHI or PII flagged (these flags are inputs, not conclusions)
+- Primary keys or foreign keys (unless they are also direct business \
+identifiers with real-world exposure risk, like SSN or DEA number)
+- Status fields, flags, or enumerated types
 - Audit timestamps (created_at, updated_at)
 - System-generated IDs with no business meaning
-- Descriptive text fields
+- Descriptive or free-text fields
 - From Reference or Junction classification entities
+- Operationally important but not damaging if exposed in isolation \
+(e.g., quantity dispensed, days supply, date of service, plan name, zip code)
 
 === SOURCE CONTEXT ===
 
 When evaluating, consider source coverage (in source_lineage):
-- Fields emphasized in Guardrails are likely business-critical
+- Fields emphasized in Guardrails are likely business-critical, but \
+business-critical does not automatically mean CDE
 - Fields in Glue represent current system reality
-- Fields in multiple sources are more likely to be essential
+- Fields appearing across multiple sources may warrant closer scrutiny
+
+=== PBM-SPECIFIC CONTEXT ===
+
+This is a pass-through PBM model (not spread). Consider that:
+- Pricing transparency is a business differentiator, but contractual rate \
+details remain confidential
+- Member clinical and identity data carries the highest breach risk
+- Prescriber DEA numbers and NPI paired with prescribing patterns can be \
+sensitive
+- BIN/PCN combinations can be used to route fraudulent claims
 
 === OUTPUT FORMAT ===
 
-Return a JSON object with your identified CDEs. Be selective - typically 15-30 elements for a domain.
+Return a JSON object with your identified CDEs.
 
 {{
   "critical_data_elements": [
     {{
       "entity": "EntityName",
       "attribute": "attribute_name",
-      "cde_category": "phi|pii|financial|business_confidential|essential_process",
-      "justification": "Brief explanation of why this meets CDE criteria"
+      "cde_category": "member_identity|clinical|financial_confidential|\
+access_credential|fraud_risk|credibility",
+      "justification": "Brief explanation of why this meets the front-page test"
     }}
   ]
 }}
 
-Focus on QUALITY over quantity. Every CDE should clearly meet the criteria above."""
+=== FINAL GATE ===
+
+For each candidate CDE, ask yourself:
+  1. "Could I justify EXCLUDING this?" — If yes, exclude it.
+  2. "Is the front-page harm specific and severe, or just generally bad?" — \
+If general, exclude it.
+  3. "Would a reasonable executive lose sleep over THIS specific field being \
+exposed?" — If not, exclude it.
+
+Only elements that survive all three questions belong on the list.
+When in doubt, leave it out. An empty list is a valid result — it means the \
+domain has no elements that meet this threshold.
+
+Do not force elements onto the list to avoid returning an empty result."""
 
 
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
+# Valid CDE categories for validation
+VALID_CDE_CATEGORIES = {
+    "member_identity",
+    "clinical",
+    "financial_confidential",
+    "access_credential",
+    "fraud_risk",
+    "credibility",
+}
+
+
 def parse_cde_response(response_text: str) -> List[Dict[str, str]]:
-    """Parse LLM response to extract CDEs."""
+    """Parse LLM response to extract CDEs.
+
+    Handles JSON wrapped in markdown fences, bare JSON objects,
+    and bare arrays. Returns an empty list on parse failure.
+    """
     text = response_text.strip()
-    
-    # Look for JSON block
+
+    # Strip markdown fences
     if "```json" in text:
         start = text.find("```json") + 7
         end = text.find("```", start)
@@ -107,22 +178,54 @@ def parse_cde_response(response_text: str) -> List[Dict[str, str]]:
         start = text.find("```") + 3
         end = text.find("```", start)
         text = text[start:end].strip()
-    
-    # Parse JSON
+
+    # Attempt full JSON object parse
     try:
         data = json.loads(text)
         return data.get("critical_data_elements", [])
     except json.JSONDecodeError:
-        # Try to find just the array
-        if "[" in text and "]" in text:
-            start = text.find("[")
-            end = text.rfind("]") + 1
-            try:
-                return json.loads(text[start:end])
-            except:
-                pass
-    
+        pass
+
+    # Fallback: extract bare array
+    if "[" in text and "]" in text:
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
+
     return []
+
+
+def validate_cdes(cdes: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Validate and clean parsed CDEs.
+
+    Ensures each CDE has required fields and a recognized category.
+    Drops malformed entries rather than failing the run.
+    """
+    required_fields = {"entity", "attribute", "cde_category", "justification"}
+    valid = []
+
+    for cde in cdes:
+        # Check required fields present and non-empty
+        if not all(cde.get(f) for f in required_fields):
+            continue
+
+        # Normalize category
+        category = cde["cde_category"].lower().strip()
+        if category not in VALID_CDE_CATEGORIES:
+            # Keep it but flag — don't silently drop legitimate CDEs
+            # over a minor category label mismatch
+            cde["cde_category"] = category
+            cde["_category_warning"] = (
+                f"Unrecognized category '{category}'. "
+                f"Expected one of: {', '.join(sorted(VALID_CDE_CATEGORIES))}"
+            )
+
+        valid.append(cde)
+
+    return valid
 
 
 # =============================================================================
@@ -132,90 +235,105 @@ def parse_cde_response(response_text: str) -> List[Dict[str, str]]:
 def identify_cdes(
     cdm: Dict[str, Any],
     llm: LLMClient,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> List[Dict[str, str]]:
-    """
-    Identify Critical Data Elements using AI with full CDM context.
-    
+    """Identify Critical Data Elements using AI with full CDM context.
+
     Args:
         cdm: Full CDM dictionary
         llm: LLM client for API calls
-        dry_run: If True, show prompt but do not call API
-    
+        dry_run: If True, save prompt but do not call API
+
     Returns:
-        List of CDE dictionaries with entity, attribute, cde_category, justification
+        List of validated CDE dicts with entity, attribute, cde_category,
+        and justification.
     """
-    
     # Build prompt with full CDM
     prompt = CDE_IDENTIFICATION_PROMPT.format(
         cdm_json=json.dumps(cdm, indent=2, default=str)
     )
-    
+
     if dry_run:
         print(f"\n{'='*60}")
         print("CDE IDENTIFICATION PROMPT (DRY RUN)")
         print(f"{'='*60}")
-        print(prompt[:2000] + "..." if len(prompt) > 2000 else prompt)
-        print(f"{'='*60}")
+        print(prompt[:3000] + "\n... [truncated]" if len(prompt) > 3000 else prompt)
+        print(f"\n{'='*60}")
         return []
-    
+
     # Call LLM
-    print(f"   Identifying Critical Data Elements (full CDM context)...")
-    
+    print("   Identifying Critical Data Elements (front-page test)...")
+
     response, _ = llm.chat(
         messages=[{"role": "user", "content": prompt}]
     )
-    
-    # Parse response
-    cdes = parse_cde_response(response)
-    
+
+    # Parse and validate
+    raw_cdes = parse_cde_response(response)
+    cdes = validate_cdes(raw_cdes)
+
+    dropped = len(raw_cdes) - len(cdes)
+    if dropped:
+        print(f"   ⚠️  Dropped {dropped} malformed CDE entries")
+
     print(f"   Identified {len(cdes)} CDEs")
-    
+
     return cdes
 
 
 def run_cde_postprocess(
     cdm: Dict[str, Any],
     llm: LLMClient,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Run CDE post-processing and add to CDM.
-    
+    """Run CDE post-processing and add results to CDM.
+
     Args:
-        cdm: Full CDM dictionary (will be modified)
+        cdm: Full CDM dictionary (will be modified in place)
         llm: LLM client
         dry_run: If True, show prompt only
-    
+
     Returns:
-        Updated CDM with critical_data_elements added
+        Updated CDM with critical_data_elements added (or empty list).
     """
-    
-    print(f"\n   POST-PROCESSING: CDE Identification")
-    print(f"   {'-'*40}")
-    
+    print(f"\n   POST-PROCESSING: CDE Identification (Front Page Test)")
+    print(f"   {'-'*50}")
+
     cdes = identify_cdes(cdm, llm, dry_run)
-    
+
+    # Always write the key — empty list is a valid, intentional result
+    # Strip internal keys (e.g., _category_warning) before persisting
+    clean_cdes = [
+        {k: v for k, v in cde.items() if not k.startswith("_")}
+        for cde in cdes
+    ]
+    cdm["critical_data_elements"] = clean_cdes
+
     if cdes:
-        cdm["critical_data_elements"] = cdes
-        
         # Count by category
-        categories = {}
+        categories: Dict[str, int] = {}
         for cde in cdes:
             cat = cde.get("cde_category", "unknown")
             categories[cat] = categories.get(cat, 0) + 1
-        
-        # Print summary
+
+        # Summary
         print(f"\n   CDEs identified: {len(cdes)}")
         print(f"   By category:")
         for cat, count in sorted(categories.items()):
             print(f"      - {cat}: {count}")
-        
-        print(f"\n   Sample CDEs:")
-        for cde in cdes[:5]:
-            cat = cde.get('cde_category', '')
-            print(f"      - {cde.get('entity')}.{cde.get('attribute')} [{cat}]")
-        if len(cdes) > 5:
-            print(f"      ... and {len(cdes) - 5} more")
-    
+
+        # Show all — list is intentionally short
+        print(f"\n   CDEs:")
+        for cde in cdes:
+            cat = cde.get("cde_category", "")
+            print(f"      • {cde.get('entity')}.{cde.get('attribute')} [{cat}]")
+
+            # Surface category warnings if present
+            if "_category_warning" in cde:
+                print(f"        ⚠️  {cde['_category_warning']}")
+    else:
+        print(f"\n   No CDEs identified for this domain.")
+        if not dry_run:
+            print(f"   This is a valid result — not all domains have front-page-level elements.")
+
     return cdm

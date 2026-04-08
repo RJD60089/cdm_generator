@@ -164,10 +164,21 @@ def load_config(config_path: str) -> AppConfig:
             version=cdm_data.get('version')
         )
         
-        output_data = data['output']
+        output_data = data.get('output', {})
+        
+        # Auto-derive output directory from domain if not specified
+        output_dir = output_data.get('directory', '')
+        if not output_dir:
+            safe_domain = cdm_data['domain'].lower().replace(' ', '_').replace('/', '_')
+            output_dir = f"output/cdm_{safe_domain}"
+        
+        output_filename = output_data.get('filename', '')
+        if not output_filename:
+            output_filename = create_default_output_filename(cdm_data['domain'])
+        
         output_config = OutputConfig(
-            directory=output_data['directory'],
-            filename=output_data.get('filename')
+            directory=output_dir,
+            filename=output_filename
         )
         
         # Parse input_files section
