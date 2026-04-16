@@ -300,33 +300,69 @@ def run_build_full_cdm(
                 if was_modified:
                     full_cdm = refined_cdm
 
-                    # Re-map ALL sources against modified CDM (not just ancillary)
-                    # The refinement may have changed entity names/structure,
-                    # so old match files for FHIR/NCPDP/EDW etc. may reference
-                    # entities that no longer exist.
-                    print(f"\n   Re-mapping ALL sources against modified CDM...")
-                    re_init_cdm = initialize_full_cdm(
-                        full_cdm, source_types, domain_description
-                    )
+                    # Ensure new entities/attributes from refinement have
+                    # source_lineage scaffolding for all source types so the
+                    # match applier can append to them.
+                    for entity in full_cdm.get("entities", []):
+                        lineage = entity.get("source_lineage", {})
+                        for st in source_types:
+                            if st not in lineage:
+                                lineage[st] = []
+                        entity["source_lineage"] = lineage
 
-                    for src_type in source_types:
-                        print(f"   Re-mapping {src_type.upper()}...")
-                        new_match = generate_match_file(
+                        for attr in entity.get("attributes", []):
+                            if not isinstance(attr, dict):
+                                continue
+                            attr_lineage = attr.get("source_lineage", {})
+                            for st in source_types:
+                                if st not in attr_lineage:
+                                    attr_lineage[st] = []
+                            attr["source_lineage"] = attr_lineage
+
+                    # Re-map only ancillary sources against the refined CDM.
+                    # Non-ancillary lineage (FHIR/NCPDP/EDW) is preserved
+                    # by _merge_entities during refinement.
+                    print(f"\n   Re-mapping ancillary sources against refined CDM...")
+
+                    for anc_source in ancillary_source_types:
+                        anc_match = generate_match_file(
                             config=config,
-                            source_type=src_type,
-                            rationalized_file=discovered_sources[src_type],
-                            full_cdm=re_init_cdm,
+                            source_type=anc_source,
+                            rationalized_file=discovered_sources[anc_source],
+                            full_cdm=full_cdm,
                             llm=llm,
                             full_cdm_dir=full_cdm_dir,
                             domain_description=domain_description,
                             dry_run=dry_run,
                         )
-                        if new_match:
-                            match_files[src_type] = new_match
+                        if anc_match:
+                            match_files[anc_source] = anc_match
 
-                    # Re-apply ALL match files
-                    full_cdm, application_report = apply_match_files(
-                        re_init_cdm, match_files, source_entities_lookup
+                    # Re-apply only ancillary match files on top of the
+                    # existing CDM (which already has non-ancillary lineage)
+                    anc_match_files = {
+                        k: v for k, v in match_files.items()
+                        if k.startswith("ancillary")
+                    }
+                    full_cdm, anc_report = apply_match_files(
+                        full_cdm, anc_match_files, source_entities_lookup
+                    )
+
+                    # Merge ancillary report into the main application report
+                    application_report["sources_applied"].extend(
+                        anc_report.get("sources_applied", [])
+                    )
+                    application_report["total_mapped"] += anc_report.get("total_mapped", 0)
+                    application_report["total_unmapped"] += anc_report.get("total_unmapped", 0)
+                    application_report["total_requires_review"] += anc_report.get("total_requires_review", 0)
+                    application_report["unmapped_fields"].extend(
+                        anc_report.get("unmapped_fields", [])
+                    )
+                    application_report["requires_review_fields"].extend(
+                        anc_report.get("requires_review_fields", [])
+                    )
+                    application_report["application_errors"].extend(
+                        anc_report.get("application_errors", [])
                     )
 
                     # Re-generate gap report
