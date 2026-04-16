@@ -340,6 +340,7 @@ Before emitting the JSON, you MUST internally (without outputting it) check that
 - All meaningful attributes appearing in the inputs are either present in the CDM or intentionally unified/omitted with a clear rationale.
 - All many-to-many relationships have corresponding junction entities with appropriate effective dates and audit fields.
 - All foreign keys are placed on the correct side and reference the primary key of the target entity.
+- Every relationship entry contains exactly these keys: "to", "type", "fk", "description". The "fk" value matches an attribute in the entity's attributes array.
 
 Return ONLY the JSON. No explanation, no markdown code blocks."""
 
