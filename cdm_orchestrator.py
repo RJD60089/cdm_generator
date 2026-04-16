@@ -178,7 +178,6 @@ Examples:
         print(f"✓ Configuration loaded")
         print(f"  Domain: {config.cdm.domain}")
         print(f"  Type: {config.cdm.type}")
-        print(f"  Description: {config.cdm.description}")
         
         # === 3. STEP SELECTION ===
         print(f"\n{'='*60}")
