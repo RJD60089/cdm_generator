@@ -391,82 +391,148 @@ Generate the rationalized JSON now."""
         """Estimate token count from content."""
         return len(json.dumps(content)) // self.CHARS_PER_TOKEN
 
-    def _split_into_chunks(self, file_content: Dict, filename: str) -> List[Dict]:
-        """Split large file content into sheet-level chunks.
+    def _explode_sheets(self, file_content: Dict, filename: str,
+                        source_id: str, file_type: str,
+                        processing_mode: str) -> List[Dict]:
+        """Explode a multi-sheet XLSX into per-sheet work items.
 
-        If the file has a 'sheets' key (XLSX converted via guardrails
-        converter), split by sheet.  Each chunk is a dict with the same
-        structure but containing only one sheet.  If a single sheet still
-        exceeds the limit, split its rows into batches.
+        Each sheet becomes an independent ancillary entry — same as if
+        the user had listed them as separate files in the config.
 
-        Returns list of content dicts, each small enough for one LLM call.
+        Args:
+            file_content: Preprocessed file content with 'sheets' key
+            filename: Original XLSX filename
+            source_id: Base source_id from config
+            file_type: File type (carried through)
+            processing_mode: Processing mode (carried through)
+
+        Returns:
+            List of work-item dicts, each with keys:
+              content, filename, source_id, file_type
         """
         sheets = file_content.get("sheets")
         if not sheets or not isinstance(sheets, dict):
-            # Not a multi-sheet file — return as-is (caller will handle error)
-            return [file_content]
+            return [{"content": file_content, "filename": filename,
+                     "source_id": source_id, "file_type": file_type}]
 
-        chunks: List[Dict] = []
         source_file = file_content.get("source_file", filename)
+        items: List[Dict] = []
 
         for sheet_name, rows in sheets.items():
             sheet_content = {"source_file": source_file, "sheets": {sheet_name: rows}}
-            est = self._estimate_tokens(sheet_content)
+            # Derive a unique source_id per sheet (no underscores)
+            safe_sheet = sheet_name.lower().replace("_", "-").replace(" ", "-")
+            sheet_source_id = f"{source_id}-{safe_sheet}"
+            sheet_filename = f"{filename}::{sheet_name}"
 
-            if est <= self.MAX_CONTENT_TOKENS:
-                chunks.append(sheet_content)
-            else:
-                # Sheet too large — split rows into batches
-                if not isinstance(rows, list):
-                    chunks.append(sheet_content)
-                    continue
+            est = self._estimate_tokens(sheet_content)
+            if est > self.MAX_CONTENT_TOKENS and isinstance(rows, list):
+                # Single sheet still too large — split rows into batches
                 batch_size = max(1, len(rows) * self.MAX_CONTENT_TOKENS // est)
-                for start in range(0, len(rows), batch_size):
+                num_batches = (len(rows) + batch_size - 1) // batch_size
+                print(f"      Sheet '{sheet_name}' too large ({est:,} est. tokens), splitting into {num_batches} batches")
+                for batch_num, start in enumerate(range(0, len(rows), batch_size), 1):
                     batch = rows[start:start + batch_size]
                     batch_content = {"source_file": source_file, "sheets": {sheet_name: batch}}
-                    chunks.append(batch_content)
-                print(f"      Sheet '{sheet_name}' split into {(len(rows) + batch_size - 1) // batch_size} batches ({len(rows)} rows)")
+                    items.append({
+                        "content": batch_content,
+                        "filename": f"{sheet_filename} (batch {batch_num})",
+                        "source_id": f"{sheet_source_id}-batch{batch_num}",
+                        "file_type": file_type,
+                    })
+            else:
+                items.append({
+                    "content": sheet_content,
+                    "filename": sheet_filename,
+                    "source_id": sheet_source_id,
+                    "file_type": file_type,
+                })
 
-        return chunks
+        return items
 
-    def _merge_rationalized(self, results: List[Dict]) -> Dict:
-        """Merge multiple rationalized results into one.
+    def _process_single(self, content: Dict, filename: str, source_id: str,
+                        file_type: str, output_path: Path,
+                        label: str) -> Optional[str]:
+        """Process a single content dict through rationalization and save output.
 
-        Combines rationalized_entities from all chunks.  Entities with the
-        same name are merged (attributes combined, source_files unioned).
+        Args:
+            content: Preprocessed file content
+            filename: Filename for lineage tracking
+            source_id: Source ID for output naming
+            file_type: File type for prompt context
+            output_path: Directory to save output
+            label: Display label (e.g. '[1/3]')
+
+        Returns:
+            Output file path, or None if dry-run / error
         """
-        merged_entities: Dict[str, Dict] = {}
+        prompt = self.build_prompt(content, filename, file_type, prior_state=None)
 
-        for result in results:
-            for entity in result.get("rationalized_entities", []):
-                name = entity.get("entity_name", "")
-                if name in merged_entities:
-                    existing = merged_entities[name]
-                    # Merge source_files
-                    existing_sources = set(existing.get("source_files", []))
-                    existing_sources.update(entity.get("source_files", []))
-                    existing["source_files"] = sorted(existing_sources)
-                    # Merge attributes by name
-                    existing_attrs = {a["attribute_name"]: a for a in existing.get("attributes", [])}
-                    for attr in entity.get("attributes", []):
-                        attr_name = attr.get("attribute_name", "")
-                        if attr_name not in existing_attrs:
-                            existing_attrs[attr_name] = attr
-                    existing["attributes"] = list(existing_attrs.values())
-                else:
-                    merged_entities[name] = entity
+        if self.dry_run:
+            stats = self.save_prompt(prompt, output_path, hash(source_id) % 10000)
+            print(f"    {label} Prompt saved: {Path(stats['file']).name}")
+            print(f"      Characters: {stats['characters']:,}")
+            print(f"      Tokens (est): {stats['tokens_estimate']:,}")
+            return None
 
-        return {"rationalized_entities": list(merged_entities.values())}
+        print(f"    {label} Calling LLM...")
+
+        try:
+            rationalized_state = self._call_llm(prompt)
+        except json.JSONDecodeError as e:
+            print(f"    {label} ERROR: Failed to parse LLM response: {e}")
+            raise
+
+        entity_count = len(rationalized_state.get("rationalized_entities", []))
+        attr_count = sum(
+            len(e.get("attributes", []))
+            for e in rationalized_state.get("rationalized_entities", [])
+        )
+        print(f"    {label} Rationalized: {entity_count} entities, {attr_count} attributes")
+
+        # Transform and save
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        domain_safe = self.cdm_domain.replace(" ", "_")
+
+        entities = self._transform_to_common_format(rationalized_state)
+        for entity in entities:
+            entity["source_type"] = source_id
+
+        total_attrs = sum(len(e.get("attributes", [])) for e in entities)
+
+        output: Dict[str, Any] = {
+            "rationalization_metadata": {
+                "source_type": source_id,
+                "cdm_domain": self.cdm_domain,
+                "cdm_classification": self.cdm_classification,
+                "rationalization_timestamp": datetime.now().isoformat(),
+                "files_processed": 1,
+                "entities_processed": len(entities),
+                "attributes_processed": total_attrs,
+            },
+            "entities": entities,
+            "reference_data": {"value_sets": [], "code_systems": []},
+        }
+
+        output_file = (
+            output_path / f"rationalized_{source_id}_{domain_safe}_{timestamp}.json"
+        )
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(output, f, indent=2, ensure_ascii=False)
+
+        print(f"    {label} Saved: {output_file.name}")
+        print(f"      Entities: {len(entities)}, Attributes: {total_attrs}")
+
+        return str(output_file)
 
     def run(self, output_dir: str) -> Optional[List[str]]:
-        """Run ancillary rationalization — one output per ancillary file.
+        """Run ancillary rationalization — one output per ancillary source.
 
-        Each ancillary file is rationalized independently (no incremental
-        merging). Output filenames use the source_id from config so each
-        ancillary source flows through the pipeline independently.
-
-        Large files (e.g. XLSX with many rows) are automatically split into
-        sheet-level or row-batch chunks to stay within LLM context limits.
+        Each ancillary file is rationalized independently. Multi-sheet XLSX
+        files that exceed the LLM context limit are automatically exploded
+        so each sheet is treated as its own independent ancillary source,
+        producing a separate output file per sheet.
 
         Args:
             output_dir: Directory to save output files
@@ -481,20 +547,17 @@ Generate the rationalized JSON now."""
             print("  No ancillary files configured, skipping")
             return None
 
-        total_files = len(self.ancillary_files)
-        output_files: List[str] = []
+        # Build the full work list — exploding large XLSX files into per-sheet items
+        work_items: List[Dict] = []
 
-        print(f"\n  Processing {total_files} ancillary file(s) independently...")
-
-        for idx, entry in enumerate(self.ancillary_files, 1):
+        for entry in self.ancillary_files:
             filename = entry.get("file", "")
             file_type = entry.get("file_type", "other")
             source_id = entry.get("source_id", "ancillary")
+            processing_mode = entry.get("processing_mode", "refiner")
             preprocessed = entry.get("preprocessed_file")
 
-            print(f"\n  [{idx}/{total_files}] {source_id} ({filename}, type={file_type})")
-
-            # Resolve to full path — prefer preprocessed JSON if available
+            # Resolve to full path
             if preprocessed:
                 file_path = config_utils.resolve_ancillary_file(
                     self.cdm_domain, preprocessed, preprocessed=True
@@ -518,119 +581,44 @@ Generate the rationalized JSON now."""
                 print(f"    Error: Failed to preprocess {filename}: {e}")
                 continue
 
-            # Check if content needs chunking
+            # Check size — explode into per-sheet items if too large
             est_tokens = self._estimate_tokens(file_content)
             if est_tokens > self.MAX_CONTENT_TOKENS:
-                chunks = self._split_into_chunks(file_content, filename)
-                print(f"    Content too large ({est_tokens:,} est. tokens), split into {len(chunks)} chunk(s)")
-            else:
-                chunks = [file_content]
-
-            # Process each chunk
-            chunk_results: List[Dict] = []
-
-            for chunk_idx, chunk_content in enumerate(chunks, 1):
-                if len(chunks) > 1:
-                    chunk_label = f"[chunk {chunk_idx}/{len(chunks)}]"
-                    # Identify which sheet is in this chunk
-                    sheet_names = list(chunk_content.get("sheets", {}).keys())
-                    sheet_info = f" (sheet: {sheet_names[0]})" if sheet_names else ""
-                    print(f"    {chunk_label}{sheet_info}")
-                    chunk_filename = f"{filename}::{sheet_names[0]}" if sheet_names else filename
-                else:
-                    chunk_filename = filename
-
-                prompt = self.build_prompt(
-                    chunk_content, chunk_filename, file_type, prior_state=None
+                items = self._explode_sheets(
+                    file_content, filename, source_id, file_type, processing_mode
                 )
-
-                # Dry run — save prompt
-                if self.dry_run:
-                    stats = self.save_prompt(prompt, output_path, idx * 100 + chunk_idx)
-                    print(f"    Prompt saved: {Path(stats['file']).name}")
-                    print(f"      Characters: {stats['characters']:,}")
-                    print(f"      Tokens (est): {stats['tokens_estimate']:,}")
-                    continue
-
-                # Live mode — call LLM
-                print(f"    Calling LLM...")
-
-                try:
-                    rationalized_state = self._call_llm(prompt)
-
-                    entity_count = len(
-                        rationalized_state.get("rationalized_entities", [])
-                    )
-                    attr_count = sum(
-                        len(e.get("attributes", []))
-                        for e in rationalized_state.get("rationalized_entities", [])
-                    )
-                    print(f"    Rationalized: {entity_count} entities, {attr_count} attributes")
-                    chunk_results.append(rationalized_state)
-
-                except json.JSONDecodeError as e:
-                    print(f"    ERROR: Failed to parse LLM response for {filename}: {e}")
-                    raise
-
-            if self.dry_run:
-                continue
-
-            # Merge chunk results if multiple
-            if len(chunk_results) > 1:
-                rationalized_state = self._merge_rationalized(chunk_results)
-                entity_count = len(rationalized_state.get("rationalized_entities", []))
-                attr_count = sum(
-                    len(e.get("attributes", []))
-                    for e in rationalized_state.get("rationalized_entities", [])
-                )
-                print(f"    Merged: {entity_count} entities, {attr_count} attributes")
-            elif chunk_results:
-                rationalized_state = chunk_results[0]
+                print(f"  {filename}: too large ({est_tokens:,} est. tokens), exploded into {len(items)} sheet(s)")
+                work_items.extend(items)
             else:
-                continue
+                work_items.append({
+                    "content": file_content,
+                    "filename": filename,
+                    "source_id": source_id,
+                    "file_type": file_type,
+                })
 
-            # Transform and save — per file, using source_id
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            domain_safe = self.cdm_domain.replace(" ", "_")
+        total_items = len(work_items)
+        print(f"\n  Processing {total_items} ancillary source(s) independently...")
 
-            entities = self._transform_to_common_format(rationalized_state)
-            # Set source_type to source_id so it flows through the pipeline correctly
-            for entity in entities:
-                entity["source_type"] = source_id
+        output_files: List[str] = []
 
-            total_attrs = sum(len(e.get("attributes", [])) for e in entities)
+        for idx, item in enumerate(work_items, 1):
+            label = f"[{idx}/{total_items}] {item['source_id']}"
+            print(f"\n  {label} ({item['filename']}, type={item['file_type']})")
 
-            output: Dict[str, Any] = {
-                "rationalization_metadata": {
-                    "source_type": source_id,
-                    "cdm_domain": self.cdm_domain,
-                    "cdm_classification": self.cdm_classification,
-                    "rationalization_timestamp": datetime.now().isoformat(),
-                    "files_processed": 1,
-                    "entities_processed": len(entities),
-                    "attributes_processed": total_attrs,
-                },
-                "entities": entities,
-                "reference_data": {"value_sets": [], "code_systems": []},
-            }
-
-            # Filename uses source_id: rationalized_{source_id}_{domain}_{timestamp}.json
-            output_file = (
-                output_path / f"rationalized_{source_id}_{domain_safe}_{timestamp}.json"
+            result = self._process_single(
+                content=item["content"],
+                filename=item["filename"],
+                source_id=item["source_id"],
+                file_type=item["file_type"],
+                output_path=output_path,
+                label=f"[{idx}/{total_items}]",
             )
+            if result:
+                output_files.append(result)
 
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(output, f, indent=2, ensure_ascii=False)
-
-            print(f"    Saved: {output_file.name}")
-            print(f"      Entities: {len(entities)}")
-            print(f"      Attributes: {total_attrs}")
-
-            output_files.append(str(output_file))
-
-        # Summary
         if self.dry_run:
-            print(f"\n  Dry run complete. {total_files} prompts saved.")
+            print(f"\n  Dry run complete. {total_items} prompts saved.")
             return []
 
         print(f"\n  Ancillary rationalization complete: {len(output_files)} file(s) produced")
