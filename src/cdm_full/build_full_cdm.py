@@ -251,10 +251,10 @@ def run_build_full_cdm(
         st for st in ancillary_source_types if st in refiner_source_ids
     ]
 
-    # Skip refiner gate if refiner data was already included in the foundational CDM
-    refiner_in_foundational = foundational_cdm.get("source_files", {}).get("ancillary_refiner") is not None
-    if refiner_in_foundational and refiner_sources_in_pipeline:
-        print(f"\n   Refiner ancillary data was included in foundational CDM — skipping refiner gate.")
+    # Skip refiner gate — refiner ancillary data is now included in the
+    # foundational CDM build (Step 2), so gap-driven refinement is unnecessary.
+    if refiner_sources_in_pipeline:
+        print(f"\n   Refiner ancillary data included in foundational CDM — skipping refiner gate.")
         refiner_sources_in_pipeline = []
 
     if refiner_sources_in_pipeline and gap_file:

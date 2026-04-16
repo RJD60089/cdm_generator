@@ -553,8 +553,7 @@ def run_step3a(
             "glue": glue_file.name if glue_file else None,
             "edw": edw_file.name if edw_file else None,
             "fhir": fhir_file.name if fhir_file else None,
-            "ncpdp": ncpdp_file.name if ncpdp_file else None,
-            "ancillary_refiner": "included" if ancillary_refiner_data else None
+            "ncpdp": ncpdp_file.name if ncpdp_file else None
         }
         
         # Save output
