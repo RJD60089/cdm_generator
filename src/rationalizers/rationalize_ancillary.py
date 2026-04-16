@@ -382,10 +382,12 @@ Generate the rationalized JSON now."""
         return entities
 
     # Max tokens (estimated) for a single LLM call — leave room for prompt
-    # overhead and response.  922K model limit; target ~700K content max.
-    MAX_CONTENT_TOKENS = 700_000
-    # Characters-per-token estimate (conservative)
-    CHARS_PER_TOKEN = 4
+    # overhead (~2K tokens) and response.  922K model limit; use 400K to be
+    # safe since char-to-token estimates are approximate.
+    MAX_CONTENT_TOKENS = 400_000
+    # Characters-per-token estimate — use 3 (conservative) since spreadsheet
+    # JSON with short keys/values tokenizes at ~3 chars/token, not 4.
+    CHARS_PER_TOKEN = 3
 
     def _estimate_tokens(self, content: Any) -> int:
         """Estimate token count from content."""
