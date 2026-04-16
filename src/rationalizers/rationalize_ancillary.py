@@ -381,12 +381,92 @@ Generate the rationalized JSON now."""
 
         return entities
 
+    # Max tokens (estimated) for a single LLM call — leave room for prompt
+    # overhead and response.  922K model limit; target ~700K content max.
+    MAX_CONTENT_TOKENS = 700_000
+    # Characters-per-token estimate (conservative)
+    CHARS_PER_TOKEN = 4
+
+    def _estimate_tokens(self, content: Any) -> int:
+        """Estimate token count from content."""
+        return len(json.dumps(content)) // self.CHARS_PER_TOKEN
+
+    def _split_into_chunks(self, file_content: Dict, filename: str) -> List[Dict]:
+        """Split large file content into sheet-level chunks.
+
+        If the file has a 'sheets' key (XLSX converted via guardrails
+        converter), split by sheet.  Each chunk is a dict with the same
+        structure but containing only one sheet.  If a single sheet still
+        exceeds the limit, split its rows into batches.
+
+        Returns list of content dicts, each small enough for one LLM call.
+        """
+        sheets = file_content.get("sheets")
+        if not sheets or not isinstance(sheets, dict):
+            # Not a multi-sheet file — return as-is (caller will handle error)
+            return [file_content]
+
+        chunks: List[Dict] = []
+        source_file = file_content.get("source_file", filename)
+
+        for sheet_name, rows in sheets.items():
+            sheet_content = {"source_file": source_file, "sheets": {sheet_name: rows}}
+            est = self._estimate_tokens(sheet_content)
+
+            if est <= self.MAX_CONTENT_TOKENS:
+                chunks.append(sheet_content)
+            else:
+                # Sheet too large — split rows into batches
+                if not isinstance(rows, list):
+                    chunks.append(sheet_content)
+                    continue
+                batch_size = max(1, len(rows) * self.MAX_CONTENT_TOKENS // est)
+                for start in range(0, len(rows), batch_size):
+                    batch = rows[start:start + batch_size]
+                    batch_content = {"source_file": source_file, "sheets": {sheet_name: batch}}
+                    chunks.append(batch_content)
+                print(f"      Sheet '{sheet_name}' split into {(len(rows) + batch_size - 1) // batch_size} batches ({len(rows)} rows)")
+
+        return chunks
+
+    def _merge_rationalized(self, results: List[Dict]) -> Dict:
+        """Merge multiple rationalized results into one.
+
+        Combines rationalized_entities from all chunks.  Entities with the
+        same name are merged (attributes combined, source_files unioned).
+        """
+        merged_entities: Dict[str, Dict] = {}
+
+        for result in results:
+            for entity in result.get("rationalized_entities", []):
+                name = entity.get("entity_name", "")
+                if name in merged_entities:
+                    existing = merged_entities[name]
+                    # Merge source_files
+                    existing_sources = set(existing.get("source_files", []))
+                    existing_sources.update(entity.get("source_files", []))
+                    existing["source_files"] = sorted(existing_sources)
+                    # Merge attributes by name
+                    existing_attrs = {a["attribute_name"]: a for a in existing.get("attributes", [])}
+                    for attr in entity.get("attributes", []):
+                        attr_name = attr.get("attribute_name", "")
+                        if attr_name not in existing_attrs:
+                            existing_attrs[attr_name] = attr
+                    existing["attributes"] = list(existing_attrs.values())
+                else:
+                    merged_entities[name] = entity
+
+        return {"rationalized_entities": list(merged_entities.values())}
+
     def run(self, output_dir: str) -> Optional[List[str]]:
         """Run ancillary rationalization — one output per ancillary file.
 
         Each ancillary file is rationalized independently (no incremental
         merging). Output filenames use the source_id from config so each
         ancillary source flows through the pipeline independently.
+
+        Large files (e.g. XLSX with many rows) are automatically split into
+        sheet-level or row-batch chunks to stay within LLM context limits.
 
         Args:
             output_dir: Directory to save output files
@@ -438,37 +518,76 @@ Generate the rationalized JSON now."""
                 print(f"    Error: Failed to preprocess {filename}: {e}")
                 continue
 
-            # Build prompt — NO prior_state, each file is independent
-            prompt = self.build_prompt(
-                file_content, filename, file_type, prior_state=None
-            )
+            # Check if content needs chunking
+            est_tokens = self._estimate_tokens(file_content)
+            if est_tokens > self.MAX_CONTENT_TOKENS:
+                chunks = self._split_into_chunks(file_content, filename)
+                print(f"    Content too large ({est_tokens:,} est. tokens), split into {len(chunks)} chunk(s)")
+            else:
+                chunks = [file_content]
 
-            # Dry run — save prompt
+            # Process each chunk
+            chunk_results: List[Dict] = []
+
+            for chunk_idx, chunk_content in enumerate(chunks, 1):
+                if len(chunks) > 1:
+                    chunk_label = f"[chunk {chunk_idx}/{len(chunks)}]"
+                    # Identify which sheet is in this chunk
+                    sheet_names = list(chunk_content.get("sheets", {}).keys())
+                    sheet_info = f" (sheet: {sheet_names[0]})" if sheet_names else ""
+                    print(f"    {chunk_label}{sheet_info}")
+                    chunk_filename = f"{filename}::{sheet_names[0]}" if sheet_names else filename
+                else:
+                    chunk_filename = filename
+
+                prompt = self.build_prompt(
+                    chunk_content, chunk_filename, file_type, prior_state=None
+                )
+
+                # Dry run — save prompt
+                if self.dry_run:
+                    stats = self.save_prompt(prompt, output_path, idx * 100 + chunk_idx)
+                    print(f"    Prompt saved: {Path(stats['file']).name}")
+                    print(f"      Characters: {stats['characters']:,}")
+                    print(f"      Tokens (est): {stats['tokens_estimate']:,}")
+                    continue
+
+                # Live mode — call LLM
+                print(f"    Calling LLM...")
+
+                try:
+                    rationalized_state = self._call_llm(prompt)
+
+                    entity_count = len(
+                        rationalized_state.get("rationalized_entities", [])
+                    )
+                    attr_count = sum(
+                        len(e.get("attributes", []))
+                        for e in rationalized_state.get("rationalized_entities", [])
+                    )
+                    print(f"    Rationalized: {entity_count} entities, {attr_count} attributes")
+                    chunk_results.append(rationalized_state)
+
+                except json.JSONDecodeError as e:
+                    print(f"    ERROR: Failed to parse LLM response for {filename}: {e}")
+                    raise
+
             if self.dry_run:
-                stats = self.save_prompt(prompt, output_path, idx)
-                print(f"    Prompt saved: {Path(stats['file']).name}")
-                print(f"      Characters: {stats['characters']:,}")
-                print(f"      Tokens (est): {stats['tokens_estimate']:,}")
                 continue
 
-            # Live mode — call LLM
-            print(f"    Calling LLM...")
-
-            try:
-                rationalized_state = self._call_llm(prompt)
-
-                entity_count = len(
-                    rationalized_state.get("rationalized_entities", [])
-                )
+            # Merge chunk results if multiple
+            if len(chunk_results) > 1:
+                rationalized_state = self._merge_rationalized(chunk_results)
+                entity_count = len(rationalized_state.get("rationalized_entities", []))
                 attr_count = sum(
                     len(e.get("attributes", []))
                     for e in rationalized_state.get("rationalized_entities", [])
                 )
-                print(f"    Rationalized: {entity_count} entities, {attr_count} attributes")
-
-            except json.JSONDecodeError as e:
-                print(f"    ERROR: Failed to parse LLM response for {filename}: {e}")
-                raise
+                print(f"    Merged: {entity_count} entities, {attr_count} attributes")
+            elif chunk_results:
+                rationalized_state = chunk_results[0]
+            else:
+                continue
 
             # Transform and save — per file, using source_id
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
