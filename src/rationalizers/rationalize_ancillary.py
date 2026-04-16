@@ -441,6 +441,7 @@ Generate the rationalized JSON now."""
                         "filename": f"{sheet_filename} (batch {batch_num})",
                         "source_id": f"{sheet_source_id}-batch{batch_num}",
                         "file_type": file_type,
+                        "_merge_into": sheet_source_id,
                     })
             else:
                 items.append({
@@ -452,26 +453,25 @@ Generate the rationalized JSON now."""
 
         return items
 
-    def _process_single(self, content: Dict, filename: str, source_id: str,
-                        file_type: str, output_path: Path,
-                        label: str) -> Optional[str]:
-        """Process a single content dict through rationalization and save output.
+    def _rationalize_single(self, content: Dict, filename: str,
+                            file_type: str, output_path: Path,
+                            label: str) -> Optional[Dict]:
+        """Rationalize a single content dict and return raw LLM output.
 
         Args:
             content: Preprocessed file content
             filename: Filename for lineage tracking
-            source_id: Source ID for output naming
             file_type: File type for prompt context
-            output_path: Directory to save output
+            output_path: Directory to save prompts (dry run)
             label: Display label (e.g. '[1/3]')
 
         Returns:
-            Output file path, or None if dry-run / error
+            Raw rationalized dict from LLM, or None if dry-run / error
         """
         prompt = self.build_prompt(content, filename, file_type, prior_state=None)
 
         if self.dry_run:
-            stats = self.save_prompt(prompt, output_path, hash(source_id) % 10000)
+            stats = self.save_prompt(prompt, output_path, hash(filename) % 10000)
             print(f"    {label} Prompt saved: {Path(stats['file']).name}")
             print(f"      Characters: {stats['characters']:,}")
             print(f"      Tokens (est): {stats['tokens_estimate']:,}")
@@ -492,7 +492,21 @@ Generate the rationalized JSON now."""
         )
         print(f"    {label} Rationalized: {entity_count} entities, {attr_count} attributes")
 
-        # Transform and save
+        return rationalized_state
+
+    def _save_rationalized(self, rationalized_state: Dict, source_id: str,
+                           output_path: Path, label: str) -> str:
+        """Transform and save a rationalized state to output file.
+
+        Args:
+            rationalized_state: Raw LLM output (rationalized_entities)
+            source_id: Source ID for output naming and source_type tagging
+            output_path: Directory to save output
+            label: Display label
+
+        Returns:
+            Output file path
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         domain_safe = self.cdm_domain.replace(" ", "_")
 
@@ -527,6 +541,35 @@ Generate the rationalized JSON now."""
         print(f"      Entities: {len(entities)}, Attributes: {total_attrs}")
 
         return str(output_file)
+
+    def _merge_rationalized(self, results: List[Dict]) -> Dict:
+        """Merge multiple rationalized results into one.
+
+        Combines rationalized_entities from all batch results. Entities with
+        the same name are merged (attributes combined, source_files unioned).
+        """
+        merged_entities: Dict[str, Dict] = {}
+
+        for result in results:
+            for entity in result.get("rationalized_entities", []):
+                name = entity.get("entity_name", "")
+                if name in merged_entities:
+                    existing = merged_entities[name]
+                    # Merge source_files
+                    existing_sources = set(existing.get("source_files", []))
+                    existing_sources.update(entity.get("source_files", []))
+                    existing["source_files"] = sorted(existing_sources)
+                    # Merge attributes by name
+                    existing_attrs = {a["attribute_name"]: a for a in existing.get("attributes", [])}
+                    for attr in entity.get("attributes", []):
+                        attr_name = attr.get("attribute_name", "")
+                        if attr_name not in existing_attrs:
+                            existing_attrs[attr_name] = attr
+                    existing["attributes"] = list(existing_attrs.values())
+                else:
+                    merged_entities[name] = entity
+
+        return {"rationalized_entities": list(merged_entities.values())}
 
     def run(self, output_dir: str) -> Optional[List[str]]:
         """Run ancillary rationalization — one output per ancillary source.
@@ -603,21 +646,49 @@ Generate the rationalized JSON now."""
         print(f"\n  Processing {total_items} ancillary source(s) independently...")
 
         output_files: List[str] = []
+        # Collect batch results keyed by merge target (sheet source_id)
+        batch_results: Dict[str, List[Dict]] = {}
 
         for idx, item in enumerate(work_items, 1):
             label = f"[{idx}/{total_items}] {item['source_id']}"
             print(f"\n  {label} ({item['filename']}, type={item['file_type']})")
 
-            result = self._process_single(
+            result = self._rationalize_single(
                 content=item["content"],
                 filename=item["filename"],
-                source_id=item["source_id"],
                 file_type=item["file_type"],
                 output_path=output_path,
                 label=f"[{idx}/{total_items}]",
             )
-            if result:
-                output_files.append(result)
+
+            if result is None:
+                continue
+
+            merge_key = item.get("_merge_into")
+            if merge_key:
+                # This is a batch — collect for merging
+                batch_results.setdefault(merge_key, []).append(result)
+            else:
+                # Not a batch — save directly
+                path = self._save_rationalized(
+                    result, item["source_id"], output_path,
+                    f"[{idx}/{total_items}]"
+                )
+                output_files.append(path)
+
+        # Merge and save batch results (one output per sheet)
+        for sheet_source_id, results in batch_results.items():
+            merged = self._merge_rationalized(results)
+            entity_count = len(merged.get("rationalized_entities", []))
+            attr_count = sum(
+                len(e.get("attributes", []))
+                for e in merged.get("rationalized_entities", [])
+            )
+            print(f"\n  Merged {len(results)} batches for {sheet_source_id}: {entity_count} entities, {attr_count} attributes")
+            path = self._save_rationalized(
+                merged, sheet_source_id, output_path, f"[merged] {sheet_source_id}"
+            )
+            output_files.append(path)
 
         if self.dry_run:
             print(f"\n  Dry run complete. {total_items} prompts saved.")
