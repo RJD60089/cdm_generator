@@ -398,20 +398,7 @@ Examples:
             if dry_run:
                 print(f"\n   DRY RUN MODE - Prompts will be saved to: {cdm_outdir / 'prompts'}")
 
-            # Driver mode: build ancillary pre-foundation first
-            if config.has_ancillary() and config.get_ancillary_by_mode('driver'):
-                print(f"\n=== Step 2a: Ancillary Pre-Foundation (Driver mode) ===")
-                from src.cdm_builder.build_ancillary_prefoundation import run_ancillary_prefoundation
-
-                run_ancillary_prefoundation(
-                    config=config,
-                    outdir=cdm_outdir,
-                    llm=llm,
-                    dry_run=dry_run,
-                    rationalized_dir=rationalized_dir
-                )
-
-            print(f"\n=== Step 2b: Build Foundational CDM ===")
+            print(f"\n=== Step 2: Build Foundational CDM ===")
             from src.cdm_builder.build_foundational_cdm import run_step3a
 
             cdm = run_step3a(

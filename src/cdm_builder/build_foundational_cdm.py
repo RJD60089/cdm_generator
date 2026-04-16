@@ -32,7 +32,7 @@ def build_prompt(
     fhir_data: Optional[Dict] = None,
     ncpdp_data: Optional[Dict] = None,
     edw_data: Optional[Dict] = None,
-    ancillary_prefoundation: Optional[Dict] = None,
+    ancillary_driver_data: Optional[Dict] = None,
     ancillary_refiner_data: Optional[Dict] = None
 ) -> str:
     """
@@ -88,7 +88,8 @@ def build_prompt(
     fhir_section = format_source(fhir_data, "FHIR")
     ncpdp_section = format_source(ncpdp_data, "NCPDP")
     edw_section = format_source(edw_data, "EDW")
-    ancillary_refiner_section = format_source(ancillary_refiner_data, "Ancillary")
+    ancillary_driver_section = format_source(ancillary_driver_data, "Ancillary Driver")
+    ancillary_refiner_section = format_source(ancillary_refiner_data, "Ancillary Refiner")
 
     # Helper to get entities from either key
     def get_entities(data: Optional[Dict]) -> list:
@@ -99,6 +100,7 @@ def build_prompt(
     # Count what we have
     gr_count = len(get_entities(guardrails_data))
     glue_count = len(get_entities(glue_data))
+    ancillary_driver_count = len(get_entities(ancillary_driver_data))
     ancillary_refiner_count = len(get_entities(ancillary_refiner_data))
     fhir_count = len(get_entities(fhir_data))
     ncpdp_count = len(get_entities(ncpdp_data))
@@ -153,35 +155,18 @@ CRITICAL PRINCIPLES
 ** When multiple standard resources represent the same concept at different technical levels (e.g., routing from NCPDP T and routing from internal files), unify them unless both levels are explicitly required for conceptual modeling.
 
 =============================================================================
-SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count + edw_count + ancillary_refiner_count} entities)
+SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count + edw_count + ancillary_driver_count + ancillary_refiner_count} entities)
 =============================================================================
 
 These define YOUR actual business entities and hierarchy. Use these as the PRIMARY source for identifying Core entities.
 """
 
-    # --- GUARDED INJECTION: Ancillary pre-foundation scaffold ---
-    # When ancillary_prefoundation is None, this block is skipped entirely
-    # and the prompt is byte-for-byte identical to the original.
-    if ancillary_prefoundation is not None:
-        scaffold_entities = ancillary_prefoundation.get("entities", [])
-        scaffold_json = json.dumps(scaffold_entities, indent=2)
-        scaffold_count = len(scaffold_entities)
-
-        prompt += f"""
-=============================================================================
-STRUCTURAL SCAFFOLD - ANCILLARY PRE-FOUNDATION ({scaffold_count} entities)
-=============================================================================
-
-The following preliminary model was generated from a CDM-specific source system
-schema. Use it as structural scaffolding - these entities and their attributes
-represent the target system's actual data structure. You MUST incorporate these
-entities into the CDM, unifying with internal business sources where they overlap.
-
-{scaffold_json}
-
-"""
-
     prompt += f"""
+
+## ANCILLARY - DRIVER ({ancillary_driver_count} entities)
+CDM-specific source system definitions — these define the target system structure and MUST be incorporated:
+
+{ancillary_driver_section}
 
 ## GUARDRAILS ({gr_count} entities)
 Business-defined entities from internal APIs and governance:
@@ -422,35 +407,32 @@ def run_step3a(
     ncpdp_data = load_rationalized_file(ncpdp_file)
     edw_data = load_rationalized_file(edw_file)
 
-    # Load ancillary pre-foundation scaffold (only if Driver-mode ancillary exists)
-    ancillary_prefoundation_data = None
-    if hasattr(config, 'get_ancillary_by_mode') and config.get_ancillary_by_mode('driver'):
-        from src.cdm_builder.build_ancillary_prefoundation import find_latest_prefoundation
-        prefoundation_file = find_latest_prefoundation(outdir, config.cdm.domain)
-        if prefoundation_file:
-            ancillary_prefoundation_data = load_rationalized_file(prefoundation_file)
-            print(f"      Ancillary: scaffold loaded ({prefoundation_file.name})")
-        else:
-            print(f"      Ancillary: Driver mode configured but no pre-foundation found")
-
-    # Load ancillary refiner sources (included as source data, not scaffold)
-    ancillary_refiner_data = None
-    if hasattr(config, 'get_ancillary_by_mode') and config.get_ancillary_by_mode('refiner'):
-        refiner_ids = [a.get('source_id') for a in config.get_ancillary_by_mode('refiner')]
+    # Load ancillary sources by processing mode
+    def _load_ancillary_by_mode(mode: str) -> Optional[Dict]:
+        if not hasattr(config, 'get_ancillary_by_mode'):
+            return None
+        entries = config.get_ancillary_by_mode(mode)
+        if not entries:
+            return None
+        source_ids = [a.get('source_id') for a in entries]
         merged_entities = []
-        refiner_files_loaded = []
-        for rid in refiner_ids:
-            rfile = find_latest_rationalized(rationalized_dir, f"rationalized_{rid}_{domain_safe}")
+        files_loaded = []
+        for sid in source_ids:
+            rfile = find_latest_rationalized(rationalized_dir, f"rationalized_{sid}_{domain_safe}")
             if rfile:
                 rdata = load_rationalized_file(rfile)
                 if rdata:
                     merged_entities.extend(
                         rdata.get('entities', rdata.get('rationalized_entities', []))
                     )
-                    refiner_files_loaded.append(rfile.name)
+                    files_loaded.append(rfile.name)
         if merged_entities:
-            ancillary_refiner_data = {"entities": merged_entities}
-            print(f"      Ancillary: {len(merged_entities)} refiner entities from {len(refiner_files_loaded)} file(s)")
+            print(f"      Ancillary:  {len(merged_entities)} {mode} entities from {len(files_loaded)} file(s)")
+            return {"entities": merged_entities}
+        return None
+
+    ancillary_driver_data = _load_ancillary_by_mode('driver')
+    ancillary_refiner_data = _load_ancillary_by_mode('refiner')
 
     # Helper to get entities from either key format
     def get_entity_count(data):
@@ -472,16 +454,16 @@ def run_step3a(
     print(f"      EDW:        {edw_count} entities" + (f" ({edw_file.name})" if edw_file else " (not found)"))
     print(f"      FHIR:       {fhir_count} entities" + (f" ({fhir_file.name})" if fhir_file else " (not found)"))
     print(f"      NCPDP:      {ncpdp_count} entities" + (f" ({ncpdp_file.name})" if ncpdp_file else " (not found)"))
-    if ancillary_refiner_count:
-        print(f"      Ancillary:  {ancillary_refiner_count} entities (refiner mode)")
+    ancillary_driver_count = get_entity_count(ancillary_driver_data)
+    ancillary_refiner_count = get_entity_count(ancillary_refiner_data)
 
-    total_entities = gr_count + glue_count + fhir_count + ncpdp_count + edw_count + ancillary_refiner_count
+    total_entities = gr_count + glue_count + fhir_count + ncpdp_count + edw_count + ancillary_driver_count + ancillary_refiner_count
     if total_entities == 0:
         print(f"   ⚠️  WARNING: No rationalized sources found. Run Step 1 first.")
         if not dry_run:
             print(f"   ❌ Cannot generate CDM without source data.")
             return None
-    
+
     # Build prompt with injected data
     prompt = build_prompt(
         config=config,
@@ -490,7 +472,7 @@ def run_step3a(
         fhir_data=fhir_data,
         ncpdp_data=ncpdp_data,
         edw_data=edw_data,
-        ancillary_prefoundation=ancillary_prefoundation_data,
+        ancillary_driver_data=ancillary_driver_data,
         ancillary_refiner_data=ancillary_refiner_data
     )
     
