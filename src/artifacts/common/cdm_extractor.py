@@ -168,16 +168,32 @@ class CDMExtractor:
         return results
     
     def get_relationships(self) -> List[RelationshipDetail]:
-        """Get all FK relationships."""
+        """Get all FK relationships.
+
+        Supports two relationship formats:
+          - Structured: {"to": "Parent", "fk": "parent_id", "to_column": "id"}
+          - Name-based: {"name": "Child_to_Parent", "type": "many_to_one"}
+        """
         results = []
         for entity in self._entities:
             child_entity = entity.get("entity_name", "")
             for rel in entity.get("relationships", []):
+                parent = rel.get("to", "")
+                fk = rel.get("fk", "")
+                parent_key = rel.get("to_column", fk)
+
+                # Parse name-based format: "Child_to_Parent"
+                if not parent and rel.get("name"):
+                    parts = rel["name"].split("_to_")
+                    if len(parts) == 2:
+                        child_entity = parts[0]
+                        parent = parts[1]
+
                 results.append(RelationshipDetail(
-                    parent_entity=rel.get("to", ""),
-                    parent_key=rel.get("to_column", rel.get("fk", "")),
+                    parent_entity=parent,
+                    parent_key=parent_key,
                     child_entity=child_entity,
-                    foreign_key=rel.get("fk", ""),
+                    foreign_key=fk,
                     relationship_type=rel.get("type", "N:1"),
                     description=rel.get("description", "")
                 ))
