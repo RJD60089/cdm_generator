@@ -9,20 +9,19 @@ Interactive flow:
   4. Step-by-step execution with granular control
 
 Steps:
-  0 - Config Generation (FHIR, NCPDP, Glue analysis)
-  1 - Input Rationalization (FHIR, NCPDP, Guardrails, Glue)
-  2 - Identify Foundational CDM Generation Mode
-  3 - Build Foundational CDM (CDM JSON)
-  4 - Refinement - Consolidation (merge overlapping entities)
-  5 - Refinement - PK/FK Validation (validate keys & relationships)
-  6 - Build Full CDM (cross-reference all sources)
-      6-POST - Post-Processing (interactive per-step menu):
-               • Rematch    - Focused second-pass on no-reason unmapped fields
-               • Sensitivity - PHI/PII flagging
-               • CDE        - Critical Data Element identification
-  7 - Generate Artifacts (DDL, LucidChart CSV, Excel, Word)
-  8 - Refinement - Naming Standards (not yet implemented)
-  9 - Excel Generation (not yet implemented)
+  0 - Config Generation (FHIR, NCPDP, Glue, EDW, Ancillary analysis)
+  1 - Rationalize Input Sources (FHIR, NCPDP, Guardrails, Glue, EDW, Ancillary)
+  2 - Build Foundational CDM (CDM JSON)
+  3 - Refinement - Consolidation (merge overlapping entities)
+  4 - Refinement - PK/FK Validation (validate keys & relationships)
+  5 - Build Full CDM (source mapping + lineage; includes Refiner gate)
+      5-POST - Post-Processing (interactive per-step menu):
+               • Rematch     — second-pass on no-reason unmapped fields
+               • Ancillary   — ancillary source enrichment
+               • Sensitivity — PHI/PII flagging
+               • CDE         — Critical Data Element identification
+  5p - Post-Processing ONLY (standalone re-run)
+  6 - Generate Artifacts (DDL, LucidChart CSV, Excel, Word)
 """
 from __future__ import annotations
 import argparse
@@ -184,35 +183,43 @@ Examples:
         # === 3. STEP SELECTION ===
         print(f"\n{'='*60}")
         print("Available steps:")
-        print("  1  - Input Rationalization (FHIR, NCPDP, Guardrails, Glue)")
-        print("  2  - Identify Foundational CDM Generation Mode")
-        print("  3  - Build Foundational CDM (CDM JSON)")
-        print("  4  - Refinement - Consolidation (merge overlapping entities)")
-        print("  5  - Refinement - PK/FK Validation (validate keys & relationships)")
-        print("  6  - Build Full CDM (cross-reference all sources)")
-        print("      └─ Post-Processing runs automatically after Step 6 (interactive menu):")
-        print("            • Rematch     — second-pass on no-reason unmapped fields")
-        print("            • Sensitivity — PHI/PII flagging")
-        print("            • CDE         — Critical Data Element identification")
-        print("  6p - Post-Processing ONLY (standalone, re-run without repeating Step 6)")
-        print("  7  - Generate Artifacts (DDL, LucidChart CSV, Excel, Word)")
-        print("  8  - Refinement - Naming Standards (not yet implemented)")
-        print("  9  - Excel Generation (not yet implemented)")
+        print()
+        print("  Config & Rationalization")
+        print("    1  - Rationalize Input Sources (FHIR, NCPDP, Guardrails, Glue, EDW, Ancillary)")
+        print()
+        print("  Build CDM")
+        print("    2  - Build Foundational CDM")
+        print()
+        print("  Refinement")
+        print("    3  - Consolidation (merge overlapping entities)")
+        print("    4  - PK/FK Validation (validate keys & relationships)")
+        print()
+        print("  Full CDM & Mapping")
+        print("    5  - Build Full CDM (source mapping + lineage; includes Refiner gate)")
+        print("        └─ Post-Processing runs automatically after Step 5 (interactive menu):")
+        print("              • Rematch     — second-pass on no-reason unmapped fields")
+        print("              • Ancillary   — ancillary source enrichment")
+        print("              • Sensitivity — PHI/PII flagging")
+        print("              • CDE         — Critical Data Element identification")
+        print("    5p - Post-Processing Only (standalone re-run)")
+        print()
+        print("  Artifacts")
+        print("    6  - Generate Artifacts (DDL, LucidChart CSV, Excel, Word)")
 
         steps_input = input(
-            "\nEnter steps to run (comma-separated, e.g., '1,2,3', '6p', or 'all') [1]: "
+            "\nEnter steps to run (comma-separated, e.g., '1,2,3', '5p', or 'all') [1]: "
         ).strip()
 
         if steps_input.lower() == 'all':
-            steps_to_run = {1, 2, 3, 4, 5, 6, 7}  # Implemented integer steps
+            steps_to_run = {1, 2, 3, 4, 5, 6}  # All implemented steps
         elif not steps_input:
             steps_to_run = {1}  # Default
         else:
             steps_to_run = set()
             for token in steps_input.split(','):
                 token = token.strip().lower()
-                if token == '6p':
-                    steps_to_run.add('6p')
+                if token == '5p':
+                    steps_to_run.add('5p')
                 else:
                     try:
                         steps_to_run.add(int(token))
@@ -233,9 +240,6 @@ Examples:
         # Create base output directory
         base_outdir = Path(config.output.directory)
         base_outdir.mkdir(parents=True, exist_ok=True)
-        
-        # Track CDM generation mode (set in Step 2, used in Step 3)
-        cdm_generation_mode = None
         
         print(f"\n{'='*60}")
         print(f"CDM GENERATION ORCHESTRATOR")
@@ -290,7 +294,13 @@ Examples:
             else:
                 print("  ℹ️  No EDW tables configured")
             
-            if not any([process_fhir, process_ncpdp, process_guardrails, process_glue, process_edw]):
+            process_ancillary = False
+            if config.has_ancillary():
+                process_ancillary = prompt_user("Process Ancillary sources?", default="Y")
+            else:
+                print("  ℹ️  No Ancillary sources configured")
+
+            if not any([process_fhir, process_ncpdp, process_guardrails, process_glue, process_edw, process_ancillary]):
                 print("  ⚠️  No sources selected for processing")
             
             # Step 1a: FHIR
@@ -357,77 +367,54 @@ Examples:
                     dry_run=dry_run,
                     config_path=str(config_file)
                 )
-            
+
+            # Step 1f: Ancillary
+            if process_ancillary:
+                print(f"\n=== Step 1f: Ancillary Rationalization ===")
+                from src.rationalizers.rationalize_ancillary import run_ancillary_rationalization
+
+                run_ancillary_rationalization(
+                    config=config,
+                    outdir=rationalized_outdir,
+                    llm=llm,
+                    dry_run=dry_run,
+                    config_path=str(config_file)
+                )
+
             print(f"\n{'='*60}")
             print(f"✓ STEP 1 COMPLETE")
             print(f"  Rationalized files saved to: {rationalized_outdir}")
             print(f"{'='*60}")
         
-        # === STEP 2: IDENTIFY FOUNDATIONAL CDM MODE ===
+        # === STEP 2: BUILD FOUNDATIONAL CDM ===
         if 2 in steps_to_run:
             print(f"\n{'='*60}")
-            print(f"STEP 2: IDENTIFY FOUNDATIONAL CDM GENERATION MODE")
+            print(f"STEP 2: BUILD FOUNDATIONAL CDM")
             print(f"{'='*60}")
-            
-            print(f"\n   Select CDM generation mode:")
-            print(f"   ─────────────────────────────────────────────────")
-            print(f"   [S] Standards  - FHIR/NCPDP structures prioritized")
-            print(f"   [H] Hybrid     - Standards + business files equally weighted")
-            print(f"   [A] AI Decide  - Let AI analyze sources and recommend")
-            print(f"   [C] Cancel     - Skip mode selection")
-            
-            while True:
-                choice = input("\nSelection [S]: ").strip().upper()
-                if choice == '' or choice == 'S':
-                    cdm_generation_mode = 'standards'
-                    print(f"\n   ✓ Mode selected: STANDARDS")
-                    print(f"     Standards-first approach - FHIR/NCPDP structures prioritized")
-                    break
-                elif choice == 'H':
-                    cdm_generation_mode = 'hybrid'
-                    print(f"\n   ✓ Mode selected: HYBRID")
-                    print(f"     Balanced approach - Standards + internal business files equally weighted")
-                    break
-                elif choice == 'A':
-                    print(f"\n   🤖 AI Determination selected...")
-                    print(f"   ⚠️  AI mode determination not yet implemented.")
-                    print(f"   Defaulting to HYBRID mode.")
-                    cdm_generation_mode = 'hybrid'
-                    break
-                elif choice == 'C':
-                    cdm_generation_mode = None
-                    print(f"\n   ○ Mode selection cancelled")
-                    print(f"     Step 3 will use default HYBRID mode if run")
-                    break
-                else:
-                    print("   Invalid choice. Please enter S, H, A, or C.")
-            
-            print(f"\n{'='*60}")
-            print(f"✓ STEP 2 COMPLETE")
-            print(f"  CDM Generation Mode: {cdm_generation_mode or 'not set (will use hybrid)'}")
-            print(f"{'='*60}")
-        
-        # === STEP 3: BUILD FOUNDATIONAL CDM ===
-        if 3 in steps_to_run:
-            print(f"\n{'='*60}")
-            print(f"STEP 3: BUILD FOUNDATIONAL CDM")
-            print(f"{'='*60}")
-            
-            # Use generation mode from Step 2, default to hybrid
-            mode = cdm_generation_mode or 'hybrid'
-            print(f"   Generation Mode: {mode.upper()}")
-            
+
             cdm_outdir = base_outdir / "cdm"
             cdm_outdir.mkdir(parents=True, exist_ok=True)
-            
-            if dry_run:
-                print(f"\n🔍 DRY RUN MODE - Prompts will be saved to: {cdm_outdir / 'prompts'}")
-            
-            print(f"\n=== Step 3a: Build Foundational CDM ({mode}) ===")
-            from src.cdm_builder.build_foundational_cdm import run_step3a
-            
             rationalized_dir = base_outdir / "rationalized"
-            
+
+            if dry_run:
+                print(f"\n   DRY RUN MODE - Prompts will be saved to: {cdm_outdir / 'prompts'}")
+
+            # Driver mode: build ancillary pre-foundation first
+            if config.has_ancillary() and config.get_ancillary_by_mode('driver'):
+                print(f"\n=== Step 2a: Ancillary Pre-Foundation (Driver mode) ===")
+                from src.cdm_builder.build_ancillary_prefoundation import run_ancillary_prefoundation
+
+                run_ancillary_prefoundation(
+                    config=config,
+                    outdir=cdm_outdir,
+                    llm=llm,
+                    dry_run=dry_run,
+                    rationalized_dir=rationalized_dir
+                )
+
+            print(f"\n=== Step 2b: Build Foundational CDM ===")
+            from src.cdm_builder.build_foundational_cdm import run_step3a
+
             cdm = run_step3a(
                 config=config,
                 outdir=cdm_outdir,
@@ -435,25 +422,25 @@ Examples:
                 dry_run=dry_run,
                 rationalized_dir=rationalized_dir
             )
-            
+
             print(f"\n{'='*60}")
-            print(f"✓ STEP 3 COMPLETE")
+            print(f"✓ STEP 2 COMPLETE")
             print(f"  CDM saved to: {cdm_outdir}")
             if cdm:
-                print(f"  Note: Run Step 7 to generate DDL and LucidChart artifacts")
+                print(f"  Note: Run Step 6 to generate artifacts")
             print(f"{'='*60}")
         
-        # === STEP 4: REFINEMENT - CONSOLIDATION ===
-        if 4 in steps_to_run:
+        # === STEP 3: REFINEMENT - CONSOLIDATION ===
+        if 3 in steps_to_run:
             print(f"\n{'='*60}")
-            print(f"STEP 4: REFINEMENT - CONSOLIDATION")
+            print(f"STEP 3: REFINEMENT - CONSOLIDATION")
             print(f"{'='*60}")
-            
+
             cdm_outdir = base_outdir / "cdm"
             cdm_outdir.mkdir(parents=True, exist_ok=True)
-            
+
             from src.refinement.refine_consolidation import run_consolidation_refinement
-            
+
             cdm = run_consolidation_refinement(
                 config=config,
                 cdm_file=None,
@@ -461,22 +448,22 @@ Examples:
                 llm=llm,
                 dry_run=dry_run
             )
-            
+
             print(f"\n{'='*60}")
-            print(f"✓ STEP 4 COMPLETE")
+            print(f"✓ STEP 3 COMPLETE")
             print(f"{'='*60}")
-        
-        # === STEP 5: REFINEMENT - PK/FK VALIDATION ===
-        if 5 in steps_to_run:
+
+        # === STEP 4: REFINEMENT - PK/FK VALIDATION ===
+        if 4 in steps_to_run:
             print(f"\n{'='*60}")
-            print(f"STEP 5: REFINEMENT - PK/FK VALIDATION")
+            print(f"STEP 4: REFINEMENT - PK/FK VALIDATION")
             print(f"{'='*60}")
-            
+
             cdm_outdir = base_outdir / "cdm"
             cdm_outdir.mkdir(parents=True, exist_ok=True)
-            
+
             from src.refinement.refine_pk_fk_validation import run_pk_fk_validation
-            
+
             cdm = run_pk_fk_validation(
                 config=config,
                 cdm_file=None,
@@ -484,15 +471,15 @@ Examples:
                 llm=llm,
                 dry_run=dry_run
             )
-            
+
             print(f"\n{'='*60}")
-            print(f"✓ STEP 5 COMPLETE")
+            print(f"✓ STEP 4 COMPLETE")
             print(f"{'='*60}")
         
-        # === STEP 6: BUILD FULL CDM ===
-        if 6 in steps_to_run:
+        # === STEP 5: BUILD FULL CDM ===
+        if 5 in steps_to_run:
             print(f"\n{'='*60}")
-            print(f"STEP 6: BUILD FULL CDM")
+            print(f"STEP 5: BUILD FULL CDM")
             print(f"{'='*60}")
             
             from src.cdm_full.build_full_cdm import (
@@ -564,9 +551,9 @@ Examples:
                     print(f"   ○ Step 6 cancelled by user")
             
             print(f"\n{'='*60}")
-            print(f"✓ STEP 6 COMPLETE")
+            print(f"✓ STEP 5 COMPLETE")
             print(f"{'='*60}")
-            
+
             # === POST-PROCESSING ===
             existing_full_cdm = find_existing_full_cdm(base_outdir, config.cdm.domain)
             if existing_full_cdm:
@@ -585,12 +572,10 @@ Examples:
             else:
                 print(f"   ⚠️  No Full CDM available - skipping post-processing")
 
-        # === STEP 6P: STANDALONE POST-PROCESSING ===
-        # Runs when user selects step 66 (or we check for a sentinel).
-        # Allows re-running Rematch / Sensitivity / CDE without repeating Step 6.
-        if "6p" in {str(s).lower() for s in steps_to_run}:
+        # === STEP 5P: STANDALONE POST-PROCESSING ===
+        if "5p" in {str(s).lower() for s in steps_to_run}:
             print(f"\n{'='*60}")
-            print(f"STEP 6P: POST-PROCESSING (standalone)")
+            print(f"STEP 5P: POST-PROCESSING (standalone)")
             print(f"{'='*60}")
 
             from src.cdm_full.run_postprocess import interactive_postprocessing
@@ -607,30 +592,25 @@ Examples:
                 print(f"   ⚠️  No Full CDM found — run Step 6 first")
 
             print(f"\n{'='*60}")
-            print(f"✓ STEP 6P COMPLETE")
+            print(f"✓ STEP 5P COMPLETE")
             print(f"{'='*60}")
 
-        # === STEP 7: GENERATE ARTIFACTS ===
-        if 7 in steps_to_run:
+        # === STEP 6: GENERATE ARTIFACTS ===
+        if 6 in steps_to_run:
             print(f"\n{'='*60}")
-            print(f"STEP 7: GENERATE ARTIFACTS")
+            print(f"STEP 6: GENERATE ARTIFACTS")
             print(f"{'='*60}")
-            
+
             from src.artifacts.run_artifacts import interactive_artifact_generation
-            
+
             artifacts = interactive_artifact_generation(
                 config=config,
                 outdir=base_outdir
             )
-            
+
             print(f"\n{'='*60}")
-            print(f"✓ STEP 7 COMPLETE")
+            print(f"✓ STEP 6 COMPLETE")
             print(f"{'='*60}")
-        
-        # === STEPS 8-9: FUTURE ===
-        if any(s in steps_to_run for s in [8, 9]):
-            future_steps = [s for s in [8, 9] if s in steps_to_run]
-            print(f"\nSteps {future_steps} not yet implemented.")
         
         print(f"\n{'='*60}")
         print("ORCHESTRATION COMPLETE")

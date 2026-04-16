@@ -1,6 +1,6 @@
 # src/cdm_full/build_full_cdm.py
 """
-Build Full CDM (Step 6) - Main Orchestration Module
+Build Full CDM (Step 5) - Main Orchestration Module
 
 5-Step Resumable Architecture:
   1. discover_sources()      - Find rationalized files
@@ -12,7 +12,7 @@ Build Full CDM (Step 6) - Main Orchestration Module
 Output Location: output/{cdm_name}/full_cdm/
 
 Usage via orchestrator:
-    python cdm_orchestrator.py plan  # Select Step 6
+    python cdm_orchestrator.py plan  # Select Step 5
 
 Orchestrator controls interactive flow - prompts user for each source.
 """
@@ -68,7 +68,7 @@ def run_build_full_cdm(
     run_gap_analysis: bool = True
 ) -> Optional[Dict]:
     """
-    Main entry point for Full CDM generation (Step 6).
+    Main entry point for Full CDM generation (Step 5).
     Orchestrator controls flow via parameters.
     
     Args:
@@ -87,7 +87,7 @@ def run_build_full_cdm(
     """
     
     print(f"\n{'='*60}")
-    print(f"STEP 6: BUILD FULL CDM")
+    print(f"STEP 5: BUILD FULL CDM")
     print(f"{'='*60}")
     print(f"   Domain: {config.cdm.domain}")
     
@@ -233,6 +233,116 @@ def run_build_full_cdm(
     else:
         print(f"\n   [Step 5/5] Gap analysis skipped by user")
     
+    # ─────────────────────────────────────────────────────────────
+    # REFINER GATE: Ancillary gap-driven CDM refinement
+    # ─────────────────────────────────────────────────────────────
+    # Triggered when:
+    #   1. Config has ancillary sources with mode=refiner
+    #   2. Gap report has unmapped ancillary fields
+    # Maps first, then refines based on actual mapping failures.
+
+    # Find ancillary source types in the pipeline (any source starting with "ancillary")
+    ancillary_source_types = [st for st in source_types if st.startswith("ancillary")]
+    refiner_source_ids = (
+        [a.get("source_id") for a in config.get_ancillary_by_mode("refiner")]
+        if hasattr(config, "get_ancillary_by_mode") else []
+    )
+    refiner_sources_in_pipeline = [
+        st for st in ancillary_source_types if st in refiner_source_ids
+    ]
+
+    if refiner_sources_in_pipeline and gap_file:
+
+        # Load gap report to check for ancillary unmapped fields
+        with open(gap_file, 'r', encoding='utf-8') as f:
+            gap_data = json.load(f)
+
+        unmapped = gap_data.get("unmapped_fields", [])
+        ancillary_unmapped = [
+            u for u in unmapped
+            if u.get("source_type", "").lower().startswith("ancillary")
+        ]
+
+        if ancillary_unmapped:
+            print(f"\n   {'─'*50}")
+            print(f"   ANCILLARY REFINER GATE")
+            print(f"   {'─'*50}")
+            print(f"   Ancillary mapping found {len(ancillary_unmapped)} unmapped fields.")
+            print(f"   Refiner sources: {', '.join(refiner_sources_in_pipeline)}")
+
+            from src.config.config_gen_core import prompt_user_choice
+            if prompt_user_choice("   Run CDM refinement based on these gaps?", default="Y"):
+
+                # Load and merge rationalized data from all ancillary sources
+                merged_ancillary_data = {"entities": []}
+                for anc_src in ancillary_source_types:
+                    anc_file = discovered_sources.get(anc_src)
+                    if anc_file:
+                        with open(anc_file, 'r', encoding='utf-8') as f:
+                            anc_data = json.load(f)
+                        merged_ancillary_data["entities"].extend(
+                            anc_data.get("entities", [])
+                        )
+
+                from src.cdm_full.refine_from_gaps import run_ancillary_gap_refinement
+
+                refined_cdm, was_modified = run_ancillary_gap_refinement(
+                    cdm=full_cdm,
+                    gap_report=gap_data,
+                    ancillary_data=merged_ancillary_data,
+                    config=config,
+                    llm=llm,
+                    outdir=full_cdm_dir,
+                    domain=config.cdm.domain,
+                    dry_run=dry_run,
+                )
+
+                if was_modified:
+                    full_cdm = refined_cdm
+
+                    # Re-map all ancillary sources against modified CDM
+                    print(f"\n   Re-mapping ancillary sources against modified CDM...")
+                    re_init_cdm = initialize_full_cdm(
+                        full_cdm, source_types, domain_description
+                    )
+
+                    for anc_source in ancillary_source_types:
+                        anc_match = generate_match_file(
+                            config=config,
+                            source_type=anc_source,
+                            rationalized_file=discovered_sources[anc_source],
+                            full_cdm=re_init_cdm,
+                            llm=llm,
+                            full_cdm_dir=full_cdm_dir,
+                            domain_description=domain_description,
+                            dry_run=dry_run,
+                        )
+                        if anc_match:
+                            match_files[anc_source] = anc_match
+
+                    # Re-apply ALL match files
+                    full_cdm, application_report = apply_match_files(
+                        re_init_cdm, match_files, source_entities_lookup
+                    )
+
+                    # Re-generate gap report
+                    gap_file = generate_gap_report(
+                        application_report, full_cdm_dir, config.cdm.domain
+                    )
+
+                    # Report improvement
+                    with open(gap_file, 'r', encoding='utf-8') as f:
+                        new_gaps = json.load(f)
+                    new_unmapped = len([
+                        u for u in new_gaps.get("unmapped_fields", [])
+                        if u.get("source_type", "").lower().startswith("ancillary")
+                    ])
+                    print(f"\n   Ancillary unmapped: {len(ancillary_unmapped)} -> {new_unmapped}")
+            else:
+                print(f"   Skipping ancillary refinement.")
+        else:
+            print(f"\n   No unmapped ancillary fields — refiner gate not triggered.")
+
     # ─────────────────────────────────────────────────────────────
     # Save Final Full CDM
     # ─────────────────────────────────────────────────────────────

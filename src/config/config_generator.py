@@ -30,6 +30,7 @@ from .config_gen_fhir import FHIRConfigGenerator
 from .config_gen_ncpdp import NCPDPConfigGenerator
 from .config_gen_glue import GlueConfigGenerator
 from .config_gen_edw import EDWConfigGenerator
+from .config_gen_ancillary import AncillaryConfigGenerator
 
 
 class ConfigGenerator(ConfigGeneratorBase):
@@ -49,6 +50,7 @@ class ConfigGenerator(ConfigGeneratorBase):
         self.ncpdp_gen = NCPDPConfigGenerator(cdm_name, llm_client)
         self.glue_gen = GlueConfigGenerator(cdm_name, llm_client)
         self.edw_gen  = EDWConfigGenerator(cdm_name, llm_client)
+        self.ancillary_gen = AncillaryConfigGenerator(cdm_name, llm_client)
     
     def run(self, dry_run: bool = False) -> Optional[Path]:
         """Execute config generation workflow.
@@ -108,10 +110,15 @@ class ConfigGenerator(ConfigGeneratorBase):
         if prompt_user_choice("\n   Run EDW entity selection?", default="Y"):
             edw_result = self.edw_gen.run_analysis(source_config, dry_run)
 
+        # Ancillary Analysis
+        ancillary_result = None
+        if prompt_user_choice("\n   Configure ancillary definition sources?", default="Y"):
+            ancillary_result = self.ancillary_gen.run_analysis(source_config, dry_run)
+
         # Step 4: Build updated config (merge changes into source)
         updated_config = self._merge_updates(
             source_config, fhir_result, ncpdp_result, glue_result,
-            guardrails_files, ddl_files, edw_result
+            guardrails_files, ddl_files, edw_result, ancillary_result
         )
         
         # Step 5: Save with new timestamp
@@ -169,7 +176,8 @@ class ConfigGenerator(ConfigGeneratorBase):
         glue_result: Optional[Dict],
         guardrails_files: List[str],
         ddl_files: List[str],
-        edw_result: Optional[Dict] = None
+        edw_result: Optional[Dict] = None,
+        ancillary_result: Optional[Dict] = None
     ) -> Dict:
         """Merge analysis results into source config.
         
@@ -233,6 +241,10 @@ class ConfigGenerator(ConfigGeneratorBase):
                     config['metadata']['ai_analysis'] = {}
                 config['metadata']['ai_analysis']['edw_assessment'] = edw_result['domain_assessment']
         
+        # Update Ancillary if analyzed
+        if ancillary_result and 'ancillary' in ancillary_result:
+            config['input_files']['ancillary'] = ancillary_result['ancillary']
+
         # Ensure output section is populated
         if 'output' not in config:
             config['output'] = {}
@@ -309,6 +321,11 @@ class ConfigGenerator(ConfigGeneratorBase):
         print(f"   NCPDP General: {len(input_files.get('ncpdp_general_standards', []))}")
         print(f"   NCPDP SCRIPT: {len(input_files.get('ncpdp_script_standards', []))}")
         print(f"   EDW entities: {len(input_files.get('edw', []))}")
+        ancillary = input_files.get('ancillary', [])
+        if ancillary:
+            print(f"   Ancillary sources: {len(ancillary)}")
+            for a in ancillary:
+                print(f"      - {a['file']} (type={a['file_type']}, mode={a['processing_mode']})")
         
         print(f"\n🚀 Next Steps:")
         print(f"   1. Review config: {filepath}")

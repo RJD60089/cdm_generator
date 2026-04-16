@@ -27,6 +27,7 @@ from src.cdm_full.postprocess_sensitivity import run_sensitivity_postprocess
 from src.cdm_full.postprocess_cde import run_cde_postprocess
 from src.cdm_full.postprocess_rematch import run_rematch_postprocess
 from src.cdm_full.postprocess_field_codes import run_field_codes_postprocess
+from src.cdm_full.postprocess_ancillary import run_ancillary_postprocess
 
 
 # =============================================================================
@@ -106,6 +107,14 @@ POSTPROCESS_STEPS = [
         "field_codes",
         "Field Code Enrichment — NCPDP / EDW (no AI)",
         run_field_codes_postprocess,
+        False,  # requires_llm
+        False,  # needs_gaps
+        True,   # needs_context — requires outdir + domain to find rationalized files and Excel
+    ),
+    (
+        "ancillary",
+        "Ancillary Source Enrichment (no AI)",
+        run_ancillary_postprocess,
         False,  # requires_llm
         False,  # needs_gaps
         True,   # needs_context — requires outdir + domain to find rationalized files and Excel

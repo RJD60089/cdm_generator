@@ -137,6 +137,58 @@ def list_ddl_files(cdm_name: str) -> List[str]:
     return [f.name for f in sorted(ddl_dir.glob("*.sql"))]
 
 
+def get_ancillary_dir(cdm_name: str) -> Path:
+    """Get ancillary input directory for a CDM.
+
+    Args:
+        cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
+
+    Returns:
+        Path to input/business/cdm_{name}/ancillary/
+    """
+    return get_cdm_dir(cdm_name) / "ancillary"
+
+
+def list_ancillary_files(cdm_name: str) -> List[str]:
+    """Auto-discover all ancillary source files for a CDM.
+
+    Searches input/business/cdm_{name}/ancillary/source/ for supported
+    file types (*.sql, *.json, *.xlsx, *.yaml, *.csv).
+
+    Args:
+        cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
+
+    Returns:
+        List of filenames (not full paths)
+    """
+    source_dir = get_ancillary_dir(cdm_name) / "source"
+    if not source_dir.exists():
+        return []
+    supported = ("*.sql", "*.ddl", "*.txt", "*.json", "*.xlsx", "*.yaml", "*.csv")
+    files: List[str] = []
+    for pattern in supported:
+        files.extend(f.name for f in source_dir.glob(pattern))
+    return sorted(set(files))
+
+
+def resolve_ancillary_file(cdm_name: str, filename: str, preprocessed: bool = False) -> Path:
+    """Resolve ancillary filename to full path.
+
+    Args:
+        cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
+        filename: Ancillary filename only (e.g., 'pharmacy_schema.sql')
+        preprocessed: If True, resolve from ancillary/ (preprocessed output);
+                      if False, resolve from ancillary/source/ (raw input)
+
+    Returns:
+        Full path to file
+    """
+    base = get_ancillary_dir(cdm_name)
+    if preprocessed:
+        return base / filename
+    return base / "source" / filename
+
+
 def list_edw_entities(cdm_name: str) -> List[str]:
     """Get EDW entity list for a CDM domain from the catalog index.
 

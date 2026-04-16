@@ -31,7 +31,8 @@ def build_prompt(
     glue_data: Optional[Dict] = None,
     fhir_data: Optional[Dict] = None,
     ncpdp_data: Optional[Dict] = None,
-    edw_data: Optional[Dict] = None
+    edw_data: Optional[Dict] = None,
+    ancillary_prefoundation: Optional[Dict] = None
 ) -> str:
     """
     Build prompt to generate CDM from config and rationalized sources.
@@ -153,6 +154,31 @@ SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count + edw_count} entities)
 =============================================================================
 
 These define YOUR actual business entities and hierarchy. Use these as the PRIMARY source for identifying Core entities.
+"""
+
+    # --- GUARDED INJECTION: Ancillary pre-foundation scaffold ---
+    # When ancillary_prefoundation is None, this block is skipped entirely
+    # and the prompt is byte-for-byte identical to the original.
+    if ancillary_prefoundation is not None:
+        scaffold_entities = ancillary_prefoundation.get("entities", [])
+        scaffold_json = json.dumps(scaffold_entities, indent=2)
+        scaffold_count = len(scaffold_entities)
+
+        prompt += f"""
+=============================================================================
+STRUCTURAL SCAFFOLD - ANCILLARY PRE-FOUNDATION ({scaffold_count} entities)
+=============================================================================
+
+The following preliminary model was generated from a CDM-specific source system
+schema. Use it as structural scaffolding - these entities and their attributes
+represent the target system's actual data structure. You MUST incorporate these
+entities into the CDM, unifying with internal business sources where they overlap.
+
+{scaffold_json}
+
+"""
+
+    prompt += """
 
 ## GUARDRAILS ({gr_count} entities)
 Business-defined entities from internal APIs and governance:
@@ -379,6 +405,17 @@ def run_step3a(
     fhir_data = load_rationalized_file(fhir_file)
     ncpdp_data = load_rationalized_file(ncpdp_file)
     edw_data = load_rationalized_file(edw_file)
+
+    # Load ancillary pre-foundation scaffold (only if Driver-mode ancillary exists)
+    ancillary_prefoundation_data = None
+    if hasattr(config, 'get_ancillary_by_mode') and config.get_ancillary_by_mode('driver'):
+        from src.cdm_builder.build_ancillary_prefoundation import find_latest_prefoundation
+        prefoundation_file = find_latest_prefoundation(outdir, config.cdm.domain)
+        if prefoundation_file:
+            ancillary_prefoundation_data = load_rationalized_file(prefoundation_file)
+            print(f"      Ancillary: scaffold loaded ({prefoundation_file.name})")
+        else:
+            print(f"      Ancillary: Driver mode configured but no pre-foundation found")
     
     # Helper to get entities from either key format
     def get_entity_count(data):
@@ -414,7 +451,8 @@ def run_step3a(
         glue_data=glue_data,
         fhir_data=fhir_data,
         ncpdp_data=ncpdp_data,
-        edw_data=edw_data
+        edw_data=edw_data,
+        ancillary_prefoundation=ancillary_prefoundation_data
     )
     
     # Ensure output directory exists

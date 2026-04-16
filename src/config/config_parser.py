@@ -40,6 +40,7 @@ class AppConfig:
     ncpdp_script_standards: List[Dict[str, Any]] = field(default_factory=list)
     naming_standard: List[str] = field(default_factory=list)
     edw: List[str] = field(default_factory=list)
+    ancillary: List[Dict[str, Any]] = field(default_factory=list)
     
     # Thresholds
     entity_threshold: float = 0.006
@@ -112,6 +113,25 @@ class AppConfig:
     def has_edw(self) -> bool:
         """Check if EDW entities are configured"""
         return len(self.edw) > 0
+
+    def has_ancillary(self) -> bool:
+        """Check if ancillary sources are configured"""
+        return len(self.ancillary) > 0
+
+    def get_ancillary_by_mode(self, mode: str) -> List[Dict[str, Any]]:
+        """Get ancillary files filtered by processing mode.
+
+        Args:
+            mode: Processing mode ('driver', 'refiner', or 'mapper')
+
+        Returns:
+            List of ancillary file entries matching the mode
+        """
+        return [a for a in self.ancillary if a.get('processing_mode') == mode]
+
+    def get_ancillary_source_ids(self) -> List[str]:
+        """Get all unique ancillary source_ids."""
+        return [a.get('source_id', 'ancillary') for a in self.ancillary]
     
     def get_fhir_by_type(self, file_type: str) -> List[Dict[str, Any]]:
         """Get FHIR IGs filtered by file_type (StructureDefinition, ValueSet, CodeSystem)"""
@@ -196,6 +216,7 @@ def load_config(config_path: str) -> AppConfig:
             ncpdp_script_standards=input_files.get('ncpdp_script_standards', []),
             naming_standard=input_files.get('naming_standard', []),
             edw=input_files.get('edw', []),
+            ancillary=input_files.get('ancillary', []),
             entity_threshold=data.get('thresholds', {}).get('entity_threshold', 0.006),
             attribute_threshold=data.get('thresholds', {}).get('attribute_threshold', 0.004),
             metadata=data.get('metadata', {})

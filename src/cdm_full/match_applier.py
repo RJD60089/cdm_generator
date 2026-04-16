@@ -41,11 +41,14 @@ def apply_match_files(
     entity_lookup = {}
     for entity in full_cdm.get("entities", []):
         entity_name = entity.get("entity_name")
+        if not entity_name:
+            continue
         normalized = entity_name.lower()
         entity_lookup[normalized] = entity
         entity["_attr_lookup"] = {
-            a.get("attribute_name").lower(): a 
+            (a.get("attribute_name") or a.get("name") or "").lower(): a
             for a in entity.get("attributes", [])
+            if a.get("attribute_name") or a.get("name")
         }
     
     application_report = {

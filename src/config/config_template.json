@@ -14,7 +14,8 @@
     "ncpdp_general_standards": [],
     "ncpdp_script_standards": [],
     "naming_standard": [],
-    "edw": []
+    "edw": [],
+    "ancillary": []
   },
   "thresholds": {
     "entity_threshold": 60,

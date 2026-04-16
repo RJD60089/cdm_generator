@@ -230,13 +230,19 @@ def run_sensitivity_postprocess(
     
     for entity in cdm.get("entities", []):
         entity_name = entity.get("entity_name", "")
+        if not entity_name:
+            continue
         for attr in entity.get("attributes", []):
-            attr_name = attr.get("attribute_name", "")
-            
+            if not isinstance(attr, dict):
+                continue
+            attr_name = attr.get("attribute_name") or attr.get("name") or ""
+            if not attr_name:
+                continue
+
             # Default to not sensitive
             attr["is_pii"] = False
             attr["is_phi"] = False
-            
+
             # Case-insensitive lookup
             result = result_lookup.get((entity_name.lower(), attr_name.lower()))
             if result:

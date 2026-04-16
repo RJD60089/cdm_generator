@@ -30,6 +30,13 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
     has_field_codes = any(
         a.ncpdp_field_codes or a.edw_field_codes for a in attributes
     )
+    # Detect which ancillary sources have data (one column per source)
+    ancillary_sources = set()
+    for a in attributes:
+        for key in a.source_lineage:
+            if key.startswith("ancillary") and a.source_lineage[key]:
+                ancillary_sources.add(key)
+    ancillary_sources = sorted(ancillary_sources)
 
     # --- Headers ---
     headers = [
@@ -39,6 +46,9 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
     ]
     if has_field_codes:
         headers += ["NCPDP Field Code", "EDW F-Code"]
+    for anc_src in ancillary_sources:
+        display_name = anc_src.replace("ancillary-", "").replace("-", " ").title()
+        headers.append(f"Ancillary {display_name}")
 
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
@@ -83,6 +93,21 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
                 "; ".join(attr.ncpdp_field_codes) if attr.ncpdp_field_codes else "",
                 "; ".join(attr.edw_field_codes)   if attr.edw_field_codes   else "",
             ]
+        for anc_src in ancillary_sources:
+            entries = attr.source_lineage.get(anc_src, [])
+            if isinstance(entries, list) and entries:
+                refs = []
+                for e in entries:
+                    src_entity = e.get("source_entity", "")
+                    src_attr = e.get("source_attribute", "")
+                    if src_entity and src_attr:
+                        refs.append(f"{src_entity}.{src_attr}")
+                    elif src_attr:
+                        refs.append(src_attr)
+                ref_str = "; ".join(refs)
+            else:
+                ref_str = ""
+            row_data.append(ref_str)
 
         for col, value in enumerate(row_data, 1):
             cell = ws.cell(row=row_idx, column=col, value=value)
@@ -119,6 +144,10 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
     if has_field_codes:
         widths["N"] = 20  # NCPDP Field Code
         widths["O"] = 20  # EDW F-Code
+    # Ancillary column widths (one per source, dynamic position)
+    for i, anc_src in enumerate(ancillary_sources):
+        col_letter = get_column_letter(len(headers) - len(ancillary_sources) + i + 1)
+        widths[col_letter] = 30
 
     ExcelStyles.set_column_widths(ws, widths)
 
