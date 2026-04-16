@@ -134,11 +134,12 @@ def _enrich_cdm(
             # --- EDW field codes ---
             edw_codes: List[str] = []
             for entry in lineage.get("edw", []):
+                src_entity = entry.get("source_entity", "")
                 src_attr = entry.get("source_attribute", "")
-                if src_attr and _FIELD_CODE_RE.match(src_attr):
-                    code = src_attr.upper()
-                    if code not in edw_codes:
-                        edw_codes.append(code)
+                if src_attr:
+                    ref = f"{src_entity}.{src_attr}" if src_entity else src_attr
+                    if ref not in edw_codes:
+                        edw_codes.append(ref)
 
             if edw_codes:
                 attr["edw_field_codes"] = edw_codes
