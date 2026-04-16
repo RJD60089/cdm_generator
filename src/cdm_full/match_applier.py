@@ -174,6 +174,8 @@ def apply_match_files(
                     
                     # Merge validation rules
                     for rule in attr_mapping.get("validation_rules_extracted", []):
+                        if "validation_rules" not in cdm_attr:
+                            cdm_attr["validation_rules"] = []
                         existing = [r for r in cdm_attr["validation_rules"] if r.get("rule") == rule]
                         if existing:
                             if source_type not in existing[0].get("sources", []):
@@ -183,9 +185,11 @@ def apply_match_files(
                                 "rule": rule,
                                 "sources": [source_type]
                             })
-                    
+
                     # Merge business rules
                     for rule in attr_mapping.get("business_rules_extracted", []):
+                        if "business_rules" not in cdm_attr:
+                            cdm_attr["business_rules"] = []
                         existing = [r for r in cdm_attr["business_rules"] if r.get("rule") == rule]
                         if existing:
                             if source_type not in existing[0].get("sources", []):
