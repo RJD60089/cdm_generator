@@ -45,7 +45,7 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
         "Classification", "PII", "PHI", "Rematch",
     ]
     if has_field_codes:
-        headers += ["NCPDP Field Code", "EDW F-Code"]
+        headers += ["NCPDP Field Code", "EDW"]
     for anc_src in ancillary_sources:
         display_name = anc_src.replace("ancillary-", "").replace("-", " ").title()
         headers.append(f"Ancillary {display_name}")
