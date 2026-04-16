@@ -130,6 +130,14 @@ Return ONLY valid JSON matching this structure:
   ]
 }}
 
+RELATIONSHIP FORMAT — MANDATORY:
+Every relationship entry MUST contain these exact keys:
+  - "to": the target entity name (e.g., "RemittanceRequest")
+  - "type": cardinality using ONLY "M:1", "1:M", "M:N", or "1:1"
+  - "fk": the foreign key attribute name on THIS entity (e.g., "remittance_request_id")
+  - "description": brief description of the relationship
+  - ONLY use these key names, DO NOT SUBSTITUTE other key names
+
 Return ONLY the JSON. No explanation, no markdown code blocks."""
 
     return prompt
