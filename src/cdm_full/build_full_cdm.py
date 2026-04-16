@@ -300,25 +300,29 @@ def run_build_full_cdm(
                 if was_modified:
                     full_cdm = refined_cdm
 
-                    # Re-map all ancillary sources against modified CDM
-                    print(f"\n   Re-mapping ancillary sources against modified CDM...")
+                    # Re-map ALL sources against modified CDM (not just ancillary)
+                    # The refinement may have changed entity names/structure,
+                    # so old match files for FHIR/NCPDP/EDW etc. may reference
+                    # entities that no longer exist.
+                    print(f"\n   Re-mapping ALL sources against modified CDM...")
                     re_init_cdm = initialize_full_cdm(
                         full_cdm, source_types, domain_description
                     )
 
-                    for anc_source in ancillary_source_types:
-                        anc_match = generate_match_file(
+                    for src_type in source_types:
+                        print(f"   Re-mapping {src_type.upper()}...")
+                        new_match = generate_match_file(
                             config=config,
-                            source_type=anc_source,
-                            rationalized_file=discovered_sources[anc_source],
+                            source_type=src_type,
+                            rationalized_file=discovered_sources[src_type],
                             full_cdm=re_init_cdm,
                             llm=llm,
                             full_cdm_dir=full_cdm_dir,
                             domain_description=domain_description,
                             dry_run=dry_run,
                         )
-                        if anc_match:
-                            match_files[anc_source] = anc_match
+                        if new_match:
+                            match_files[src_type] = new_match
 
                     # Re-apply ALL match files
                     full_cdm, application_report = apply_match_files(
