@@ -178,7 +178,7 @@ entities into the CDM, unifying with internal business sources where they overla
 
 """
 
-    prompt += """
+    prompt += f"""
 
 ## GUARDRAILS ({gr_count} entities)
 Business-defined entities from internal APIs and governance:
@@ -520,6 +520,7 @@ def run_step3a(
         cdm["source_files"] = {
             "guardrails": guardrails_file.name if guardrails_file else None,
             "glue": glue_file.name if glue_file else None,
+            "edw": edw_file.name if edw_file else None,
             "fhir": fhir_file.name if fhir_file else None,
             "ncpdp": ncpdp_file.name if ncpdp_file else None
         }
