@@ -528,7 +528,7 @@ Examples:
                         outdir=base_outdir,
                         llm=llm,
                         dry_run=dry_run,
-                        sources_to_map=sources_to_map if sources_to_map else None,
+                        sources_to_map=sources_to_map,
                         skip_mapping=skip_mapping,
                         generate_cdm=generate_cdm,
                         run_gap_analysis=run_gap_analysis
