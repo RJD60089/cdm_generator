@@ -317,7 +317,7 @@ def interactive_artifact_generation(
     if llm is not None or dry_run:
         run_rule_consolidation_flag = prompt_yes_no(
             "Run AI Business Rules Consolidation (populates Business_Rules_Consolidated tab)?",
-            default="N",
+            default="Y",
         )
 
     if not any([
