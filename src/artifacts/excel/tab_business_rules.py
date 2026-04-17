@@ -13,11 +13,39 @@ CONFLICT_FILL = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type=
 CONFLICT_FONT = Font(bold=True, color="9C0006", size=10)
 
 
-def _format_sources(sources):
-    """Render a sources list as a short readable string."""
+def _format_sources(sources, source_lineage):
+    """
+    Render a rule's sources with specific source_entity.source_attribute
+    references pulled from the attribute's lineage.
+
+    Output example:
+        fhir: Patient.gender; Patient.sex | ncpdp: 335-2U (Gender Code)
+    Falls back to bare source type when lineage has no details.
+    """
     if not sources:
         return ""
-    return ", ".join(sorted({s for s in sources if s}))
+
+    parts = []
+    for src in sorted({s for s in sources if s}):
+        entries = source_lineage.get(src, []) or []
+        refs = []
+        if isinstance(entries, list):
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                src_entity = e.get("source_entity", "")
+                src_attr = e.get("source_attribute", "")
+                if src_entity and src_attr:
+                    refs.append(f"{src_entity}.{src_attr}")
+                elif src_attr:
+                    refs.append(src_attr)
+                elif src_entity:
+                    refs.append(src_entity)
+        if refs:
+            parts.append(f"{src}: {'; '.join(refs)}")
+        else:
+            parts.append(src)
+    return " | ".join(parts)
 
 
 def _normalize_rule_text(text: str) -> str:
@@ -121,7 +149,7 @@ def create_business_rules_tab(wb: Workbook, extractor: CDMExtractor) -> None:
                 attr.attribute_name,
                 rule_type,
                 rule_text,
-                _format_sources(rule.get("sources", [])),
+                _format_sources(rule.get("sources", []), attr.source_lineage),
                 conflict_id,
             ]
             for col, value in enumerate(row_data, 1):
@@ -137,7 +165,7 @@ def create_business_rules_tab(wb: Workbook, extractor: CDMExtractor) -> None:
         "B": 30,   # Attribute
         "C": 15,   # Rule Type
         "D": 80,   # Rule Description
-        "E": 25,   # Source(s)
+        "E": 55,   # Source(s) — now includes source_entity.source_attribute refs
         "F": 12,   # Conflict ID
     }
     ExcelStyles.set_column_widths(ws, widths)
