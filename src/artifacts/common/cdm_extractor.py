@@ -41,6 +41,9 @@ class AttributeDetail:
     source_lineage: Dict[str, List[Dict]]
     ncpdp_field_codes: List[str] = field(default_factory=list)
     edw_field_codes: List[str] = field(default_factory=list)
+    # Full rule dicts preserving source metadata: [{"rule": "...", "sources": ["fhir", ...]}]
+    business_rules_full: List[Dict[str, Any]] = field(default_factory=list)
+    validation_rules_full: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -140,9 +143,23 @@ class CDMExtractor:
                         fk_to = f"{rel.get('to')}.{rel.get('to_column', rel.get('fk'))}"
                         break
                 
-                # Extract business rules
-                business_rules = [r.get("rule", "") for r in attr.get("business_rules", [])]
-                validation_rules = [r.get("rule", "") for r in attr.get("validation_rules", [])]
+                # Extract business rules — preserve both text-only and full-dict forms
+                def _normalize_rules(raw):
+                    normalized = []
+                    for r in raw or []:
+                        if isinstance(r, dict):
+                            normalized.append({
+                                "rule": r.get("rule", ""),
+                                "sources": r.get("sources", []) or [],
+                            })
+                        elif isinstance(r, str):
+                            normalized.append({"rule": r, "sources": []})
+                    return normalized
+
+                business_rules_full = _normalize_rules(attr.get("business_rules", []))
+                validation_rules_full = _normalize_rules(attr.get("validation_rules", []))
+                business_rules = [r["rule"] for r in business_rules_full]
+                validation_rules = [r["rule"] for r in validation_rules_full]
                 
                 results.append(AttributeDetail(
                     entity_name=entity_name,
@@ -163,7 +180,9 @@ class CDMExtractor:
                     validation_rules=validation_rules,
                     source_lineage=attr.get("source_lineage", {}),
                     ncpdp_field_codes=attr.get("ncpdp_field_codes", []),
-                    edw_field_codes=attr.get("edw_field_codes", [])
+                    edw_field_codes=attr.get("edw_field_codes", []),
+                    business_rules_full=business_rules_full,
+                    validation_rules_full=validation_rules_full,
                 ))
         return results
     

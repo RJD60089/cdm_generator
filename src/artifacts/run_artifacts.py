@@ -124,7 +124,10 @@ def run_artifact_generation(
     generate_ddl_sql_flag: bool = False,
     generate_lucidchart_flag: bool = False,
     dialect: str = "sqlserver",
-    schema: str = "dbo"
+    schema: str = "dbo",
+    run_rule_consolidation_flag: bool = False,
+    llm=None,
+    dry_run: bool = False,
 ) -> Dict[str, Path]:
     """
     Run artifact generation from Full CDM.
@@ -161,29 +164,52 @@ def run_artifact_generation(
     # Find supporting files
     gaps_file = find_gaps_file(outdir, config.cdm.domain)
     consolidation_file = find_consolidation_file(outdir, config.cdm.domain)
-    
+
     if gaps_file:
         print(f"   Gaps file: {gaps_file.name}")
     if consolidation_file:
         print(f"   Consolidation file: {consolidation_file.name}")
-    
+
+    # AI Business Rules Consolidation (produces JSON read by the Excel tab)
+    from src.artifacts.common.rule_consolidator import (
+        find_consolidated_rules_file,
+        run_rule_consolidation,
+    )
+
+    if run_rule_consolidation_flag:
+        print(f"\n   Running AI Business Rules Consolidation...")
+        try:
+            run_rule_consolidation(
+                cdm_path=cdm_file,
+                outdir=outdir,
+                llm=llm,
+                dry_run=dry_run,
+            )
+        except Exception as e:
+            print(f"   ⚠️  Rule consolidation failed: {e}")
+
+    consolidated_rules_file = find_consolidated_rules_file(outdir, config.cdm.domain)
+    if consolidated_rules_file:
+        print(f"   Consolidated rules: {consolidated_rules_file.name}")
+
     # Generate Excel CDM
     if generate_excel_flag:
         print(f"\n   Generating Excel CDM...")
-        
+
         from src.artifacts.excel.generate_excel_cdm import generate_excel_cdm
-        
+
         excel_file = artifacts_dir / f"{domain_safe}_CDM_{timestamp}.xlsx"
-        
+
         generate_excel_cdm(
             config=config,
             cdm_path=cdm_file,
             output_path=excel_file,
             gaps_path=gaps_file,
             consolidation_path=consolidation_file,
-            erd_url=None
+            erd_url=None,
+            consolidated_rules_path=consolidated_rules_file,
         )
-        
+
         outputs["excel"] = excel_file
     
     # Generate DDL SQL file
@@ -248,7 +274,12 @@ def run_artifact_generation(
 # INTERACTIVE ENTRY POINT
 # =============================================================================
 
-def interactive_artifact_generation(config: AppConfig, outdir: Path) -> Dict[str, Path]:
+def interactive_artifact_generation(
+    config: AppConfig,
+    outdir: Path,
+    llm=None,
+    dry_run: bool = False,
+) -> Dict[str, Path]:
     """
     Interactive artifact generation with Y/N prompts.
     Called from orchestrator.
@@ -280,8 +311,19 @@ def interactive_artifact_generation(config: AppConfig, outdir: Path) -> Dict[str
     generate_ddl_word_flag = prompt_yes_no("Generate Word DDL Script?", default="N")
     generate_ddl_sql_flag = prompt_yes_no("Generate DDL SQL file?", default="Y")
     generate_lucidchart_flag = prompt_yes_no("Generate LucidChart CSV?", default="Y")
-    
-    if not any([generate_excel_flag, generate_ddl_word_flag, generate_ddl_sql_flag, generate_lucidchart_flag]):
+
+    # AI consolidation is optional — only prompt if LLM is available OR dry-run
+    run_rule_consolidation_flag = False
+    if llm is not None or dry_run:
+        run_rule_consolidation_flag = prompt_yes_no(
+            "Run AI Business Rules Consolidation (populates Business_Rules_Consolidated tab)?",
+            default="N",
+        )
+
+    if not any([
+        generate_excel_flag, generate_ddl_word_flag, generate_ddl_sql_flag,
+        generate_lucidchart_flag, run_rule_consolidation_flag,
+    ]):
         print("\n   No artifacts selected.")
         return {}
     
@@ -307,7 +349,10 @@ def interactive_artifact_generation(config: AppConfig, outdir: Path) -> Dict[str
         generate_ddl_sql_flag=generate_ddl_sql_flag,
         generate_lucidchart_flag=generate_lucidchart_flag,
         dialect=dialect,
-        schema=schema
+        schema=schema,
+        run_rule_consolidation_flag=run_rule_consolidation_flag,
+        llm=llm,
+        dry_run=dry_run,
     )
     
     # Summary

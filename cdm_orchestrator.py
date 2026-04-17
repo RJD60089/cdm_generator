@@ -605,7 +605,9 @@ Examples:
 
             artifacts = interactive_artifact_generation(
                 config=config,
-                outdir=base_outdir
+                outdir=base_outdir,
+                llm=llm,
+                dry_run=dry_run,
             )
 
             print(f"\n{'='*60}")

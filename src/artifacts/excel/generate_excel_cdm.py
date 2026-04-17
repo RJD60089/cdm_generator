@@ -21,6 +21,7 @@ from src.artifacts.excel.tab_relationships import create_relationships_tab
 from src.artifacts.excel.tab_cross_reference import create_cross_reference_tab
 from src.artifacts.excel.tab_cde import create_cde_tab
 from src.artifacts.excel.tab_business_rules import create_business_rules_tab
+from src.artifacts.excel.tab_business_rules_consolidated import create_business_rules_consolidated_tab
 from src.artifacts.excel.tab_business_capabilities import create_business_capabilities_tab
 from src.artifacts.excel.tab_summary import create_summary_tab
 from src.artifacts.excel.tab_erd import create_erd_tab
@@ -28,6 +29,10 @@ from src.artifacts.excel.tab_requires_review import create_requires_review_tab
 from src.artifacts.excel.tab_sme_questions import create_sme_questions_tab
 from src.artifacts.excel.tab_unmapped import create_unmapped_tab
 from src.artifacts.excel.tab_source_files import create_source_files_tab
+from src.artifacts.excel.tab_lab import (
+    create_data_dictionary_lab_tab,
+    create_entities_lab_tab,
+)
 
 
 def generate_excel_cdm(
@@ -36,7 +41,8 @@ def generate_excel_cdm(
     output_path: Path,
     gaps_path: Optional[Path] = None,
     consolidation_path: Optional[Path] = None,
-    erd_url: Optional[str] = None
+    erd_url: Optional[str] = None,
+    consolidated_rules_path: Optional[Path] = None,
 ) -> Path:
     """
     Generate complete Excel CDM workbook.
@@ -81,11 +87,19 @@ def generate_excel_cdm(
     # 2. Entities - entity overview
     print(f"      - Entities")
     create_entities_tab(wb, extractor)
-    
+
+    # 2b. Entities Lab - workshop columns for entity-level review
+    print(f"      - Entities_Lab")
+    create_entities_lab_tab(wb, extractor)
+
     # 3. Data Dictionary - primary reference
     print(f"      - Data_Dictionary")
     create_data_dictionary_tab(wb, extractor)
-    
+
+    # 3b. Data Dictionary Lab - workshop columns for attribute-level review
+    print(f"      - Data_Dictionary_Lab")
+    create_data_dictionary_lab_tab(wb, extractor)
+
     # 4. Relationships - FK details
     print(f"      - Relationships")
     create_relationships_tab(wb, extractor)
@@ -101,7 +115,11 @@ def generate_excel_cdm(
     # 7. Business Rules
     print(f"      - Business_Rules")
     create_business_rules_tab(wb, extractor)
-    
+
+    # 7b. Business Rules Consolidated — AI-driven (reads separate JSON)
+    print(f"      - Business_Rules_Consolidated")
+    create_business_rules_consolidated_tab(wb, consolidated_rules_path)
+
     # 8. Business Capabilities
     print(f"      - Business_Capabilities")
     create_business_capabilities_tab(wb, extractor, config)
