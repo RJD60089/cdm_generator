@@ -38,7 +38,9 @@ class AttributeDetail:
     is_phi: bool
     business_rules: List[str]
     validation_rules: List[str]
-    source_lineage: Dict[str, List[Dict]]
+    business_rules_full: List[Dict] = field(default_factory=list)
+    validation_rules_full: List[Dict] = field(default_factory=list)
+    source_lineage: Dict[str, List[Dict]] = field(default_factory=dict)
     ncpdp_field_codes: List[str] = field(default_factory=list)
     edw_field_codes: List[str] = field(default_factory=list)
 
@@ -141,8 +143,12 @@ class CDMExtractor:
                         break
                 
                 # Extract business rules
-                business_rules = [r.get("rule", "") for r in attr.get("business_rules", [])]
-                validation_rules = [r.get("rule", "") for r in attr.get("validation_rules", [])]
+                raw_business = attr.get("business_rules", [])
+                raw_validation = attr.get("validation_rules", [])
+                business_rules = [r.get("rule", "") if isinstance(r, dict) else r for r in raw_business]
+                validation_rules = [r.get("rule", "") if isinstance(r, dict) else r for r in raw_validation]
+                business_rules_full = [r if isinstance(r, dict) else {"rule": r, "sources": []} for r in raw_business]
+                validation_rules_full = [r if isinstance(r, dict) else {"rule": r, "sources": []} for r in raw_validation]
                 
                 results.append(AttributeDetail(
                     entity_name=entity_name,
@@ -161,6 +167,8 @@ class CDMExtractor:
                     is_phi=attr.get("is_phi", False),
                     business_rules=business_rules,
                     validation_rules=validation_rules,
+                    business_rules_full=business_rules_full,
+                    validation_rules_full=validation_rules_full,
                     source_lineage=attr.get("source_lineage", {}),
                     ncpdp_field_codes=attr.get("ncpdp_field_codes", []),
                     edw_field_codes=attr.get("edw_field_codes", [])

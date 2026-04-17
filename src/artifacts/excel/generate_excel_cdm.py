@@ -28,6 +28,7 @@ from src.artifacts.excel.tab_requires_review import create_requires_review_tab
 from src.artifacts.excel.tab_sme_questions import create_sme_questions_tab
 from src.artifacts.excel.tab_unmapped import create_unmapped_tab
 from src.artifacts.excel.tab_source_files import create_source_files_tab
+from src.artifacts.excel.tab_lab import create_lab_tab
 
 
 def generate_excel_cdm(
@@ -86,7 +87,11 @@ def generate_excel_cdm(
     print(f"      - Data_Dictionary")
     create_data_dictionary_tab(wb, extractor)
     
-    # 4. Relationships - FK details
+    # 4. Data Dictionary Lab - workshop version
+    print(f"      - Data_Dictionary_Lab")
+    create_lab_tab(wb, extractor)
+
+    # 5. Relationships - FK details
     print(f"      - Relationships")
     create_relationships_tab(wb, extractor)
     
