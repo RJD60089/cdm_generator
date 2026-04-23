@@ -25,6 +25,11 @@
     "directory": "",
     "filename": ""
   },
+  "mapping": {
+    "source_application": "",
+    "source_schema": "",
+    "mapping_sources": []
+  },
   "metadata": {
     "generated_at": null,
     "ai_analysis": {

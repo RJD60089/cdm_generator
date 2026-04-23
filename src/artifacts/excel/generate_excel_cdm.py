@@ -33,6 +33,7 @@ from src.artifacts.excel.tab_lab import (
     create_data_dictionary_lab_tab,
     create_entities_lab_tab,
 )
+from src.artifacts.excel.tab_mapping import create_mapping_tab
 
 
 def generate_excel_cdm(
@@ -100,18 +101,20 @@ def generate_excel_cdm(
     print(f"      - Data_Dictionary_Lab")
     create_data_dictionary_lab_tab(wb, extractor)
 
+    # 3c. Candidate CDEs - placed right after Data_Dictionary_Lab so the
+    # CDE list is discoverable alongside the attribute-level tabs and can
+    # be referenced by the Mapping tab further down the workbook.
+    print(f"      - Candidate_CDEs")
+    create_cde_tab(wb, extractor)
+
     # 4. Relationships - FK details
     print(f"      - Relationships")
     create_relationships_tab(wb, extractor)
-    
+
     # 5. Cross-Reference - source lineage mapping
     print(f"      - Cross_Reference")
     create_cross_reference_tab(wb, extractor)
-    
-    # 6. Candidate CDEs (reads directly from CDM)
-    print(f"      - Candidate_CDEs")
-    create_cde_tab(wb, extractor)
-    
+
     # 7. Business Rules
     print(f"      - Business_Rules")
     create_business_rules_tab(wb, extractor)
@@ -143,7 +146,11 @@ def generate_excel_cdm(
     # 13. ERD
     print(f"      - ERD")
     create_erd_tab(wb, erd_url)
-    
+
+    # 14. Mapping — Collibra source-to-target mapping (last tab)
+    print(f"      - Mapping")
+    create_mapping_tab(wb, extractor, config)
+
     # Save workbook
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)

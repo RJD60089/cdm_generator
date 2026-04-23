@@ -25,11 +25,29 @@ class OutputConfig:
 
 
 @dataclass
+class MappingConfig:
+    """Mapping-tab configuration for Collibra loads.
+
+    source_application / source_schema are fixed strings written into every
+    Mapping-tab row.  mapping_sources lists the source_lineage keys
+    (e.g. "edw", "ancillary-cost-share-accumulators") that should be used
+    to populate Mapping rows — each becomes a Y/N column in the tab.
+    """
+    source_application: str = ""
+    source_schema: str = ""
+    mapping_sources: List[str] = field(default_factory=list)
+
+    def has_mapping(self) -> bool:
+        return bool(self.mapping_sources)
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration"""
     cdm: CDMConfig
     output: OutputConfig
     config_path: str = ""
+    mapping: MappingConfig = field(default_factory=MappingConfig)
     
     # Input files - structured per config_generator output
     fhir_igs: List[Dict[str, Any]] = field(default_factory=list)
@@ -203,11 +221,20 @@ def load_config(config_path: str) -> AppConfig:
         
         # Parse input_files section
         input_files = data.get('input_files', {})
-        
+
+        # Parse mapping section (optional)
+        mapping_data = data.get('mapping', {}) or {}
+        mapping_config = MappingConfig(
+            source_application=mapping_data.get('source_application', ''),
+            source_schema=mapping_data.get('source_schema', ''),
+            mapping_sources=list(mapping_data.get('mapping_sources', []) or []),
+        )
+
         config = AppConfig(
             cdm=cdm_config,
             output=output_config,
             config_path=str(config_path),
+            mapping=mapping_config,
             fhir_igs=input_files.get('fhir_igs', []),
             guardrails=input_files.get('guardrails', []),
             glue=input_files.get('glue', []),
