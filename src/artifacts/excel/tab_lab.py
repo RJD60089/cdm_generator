@@ -175,11 +175,23 @@ def create_data_dictionary_lab_tab(
         elif attr.precision:
             size = f"{attr.precision},{attr.scale or 0}"
 
-        is_rematch = any(
-            mapping.get("rematch") is True
-            for mappings in attr.source_lineage.values()
-            for mapping in (mappings if isinstance(mappings, list) else [])
-        )
+        # Rematch flag — combine rematch_type across the attribute's
+        # lineage entries (N = name-only, S = semantic-only, B = both).
+        # Legacy rematch=True without rematch_type is treated as "S".
+        rematch_types: set = set()
+        for mappings in attr.source_lineage.values():
+            for mapping in (mappings if isinstance(mappings, list) else []):
+                if mapping.get("rematch") is True:
+                    rematch_types.add((mapping.get("rematch_type") or "S").upper())
+        if not rematch_types:
+            rematch_display = ""
+        elif rematch_types == {"N"}:
+            rematch_display = "N"
+        elif rematch_types == {"S"}:
+            rematch_display = "S"
+        else:
+            rematch_display = "B"
+        is_rematch = bool(rematch_display)
 
         tail_data = [
             attr.data_type,
@@ -191,7 +203,7 @@ def create_data_dictionary_lab_tab(
             attr.classification or "",
             "Y" if attr.is_pii else "",
             "Y" if attr.is_phi else "",
-            "R" if is_rematch else "",
+            rematch_display,
         ]
         if has_field_codes:
             tail_data += [

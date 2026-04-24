@@ -24,6 +24,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -37,6 +38,16 @@ from src.core.llm_client import LLMClient
 
 REMATCH_BATCH_SIZE = 60      # Attrs per LLM call - smaller for focused attention
 MAX_CDM_ATTR_DESC = 120      # Chars to include per CDM attribute description
+
+# Fuzzy name-match pre-pass tunables.
+# - THRESHOLD: minimum SequenceMatcher.ratio() for a candidate to be a
+#   plausible match.  0.55 cleanly separates:
+#     f327 <-> 327-CR        (0.60 -> match)
+#     claim_code <-> elig_code (0.53 -> reject)
+# - TIE_MARGIN: best and second-best must differ by at least this much or
+#   the match is considered ambiguous and deferred to the LLM pass.
+DEFAULT_NAME_SIMILARITY_THRESHOLD = 0.55
+DEFAULT_NAME_TIE_MARGIN = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +204,122 @@ def _deduplicate_unmapped(
 
 
 # ---------------------------------------------------------------------------
+# Fuzzy-name-match pre-pass (deterministic, no LLM)
+# ---------------------------------------------------------------------------
+
+def _build_cdm_identity_index(cdm: Dict) -> List[Tuple[str, str, str]]:
+    """
+    Flatten every CDM attribute into the identity strings a source field
+    could plausibly match on.  Returns a list of
+      (cdm_entity_name, cdm_attribute_name, identity_string_lower)
+    with one row per identity string (attribute_name, each ncpdp_field_code,
+    each edw_field_code).
+
+    The same (entity, attribute) pair appears multiple times in this list
+    if it carries multiple field codes — that is intentional so a source
+    field only has to hit ANY identity to be considered.
+    """
+    idx: List[Tuple[str, str, str]] = []
+    for entity in cdm.get("entities", []):
+        ent = entity.get("entity_name", "")
+        for attr in entity.get("attributes", []):
+            aname = attr.get("attribute_name", "")
+            if not aname:
+                continue
+            idx.append((ent, aname, aname.lower()))
+            for code in attr.get("ncpdp_field_codes", []) or []:
+                c = (code or "").strip().lower()
+                if c:
+                    idx.append((ent, aname, c))
+            for code in attr.get("edw_field_codes", []) or []:
+                c = (code or "").strip().lower()
+                if c:
+                    idx.append((ent, aname, c))
+    return idx
+
+
+def _fuzzy_name_match_one(
+    src_attr: str,
+    identity_index: List[Tuple[str, str, str]],
+    threshold: float,
+    tie_margin: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Find the single best CDM attribute for a source field using
+    SequenceMatcher.ratio().  Returns None when:
+      - best score is below threshold, OR
+      - the second-best (different attribute) is within tie_margin of the
+        best — i.e. ambiguous.
+    """
+    if not src_attr:
+        return None
+    src = src_attr.strip().lower()
+
+    # Best score per (cdm_entity, cdm_attribute) across all its identities
+    best_per_attr: Dict[Tuple[str, str], Tuple[float, str]] = {}
+    for ent, aname, identity in identity_index:
+        ratio = SequenceMatcher(None, src, identity).ratio()
+        key = (ent, aname)
+        if ratio > best_per_attr.get(key, (-1.0, ""))[0]:
+            best_per_attr[key] = (ratio, identity)
+
+    if not best_per_attr:
+        return None
+
+    ranked = sorted(best_per_attr.items(), key=lambda kv: kv[1][0], reverse=True)
+    top_key, (top_score, top_identity) = ranked[0]
+    if top_score < threshold:
+        return None
+    if len(ranked) > 1:
+        runner_up_score = ranked[1][1][0]
+        if (top_score - runner_up_score) < tie_margin:
+            return None  # ambiguous — let the LLM pass decide
+
+    ent, aname = top_key
+    return {
+        "cdm_entity": ent,
+        "cdm_attribute": aname,
+        "score": round(top_score, 3),
+        "matched_identity": top_identity,
+    }
+
+
+def _fuzzy_name_match_pass(
+    unique_fields: List[Dict],
+    cdm: Dict,
+    threshold: float = DEFAULT_NAME_SIMILARITY_THRESHOLD,
+    tie_margin: float = DEFAULT_NAME_TIE_MARGIN,
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """
+    Run the fuzzy-name pre-pass against the deduplicated unmapped field
+    list.  Returns {(source_type, source_attribute) -> match_info}
+    including cdm_entity, cdm_attribute, score, matched_identity, and a
+    synthesised reasoning string.
+    """
+    identity_index = _build_cdm_identity_index(cdm)
+    results: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for f in unique_fields:
+        src_type = f.get("source_type", "")
+        src_attr = f.get("source_attribute", "")
+        if not src_type or not src_attr:
+            continue
+        hit = _fuzzy_name_match_one(src_attr, identity_index, threshold, tie_margin)
+        if hit is None:
+            continue
+        results[(src_type, src_attr)] = {
+            "cdm_entity":        hit["cdm_entity"],
+            "cdm_attribute":     hit["cdm_attribute"],
+            "score":             hit["score"],
+            "matched_identity":  hit["matched_identity"],
+            "reasoning": (
+                f"Name-similarity match against '{hit['matched_identity']}' "
+                f"(ratio={hit['score']:.2f})"
+            ),
+        }
+    return results
+
+
+# ---------------------------------------------------------------------------
 # LLM call + parse
 # ---------------------------------------------------------------------------
 
@@ -253,6 +380,103 @@ def _call_rematch_llm(
 
 
 # ---------------------------------------------------------------------------
+# Merge pass results
+# ---------------------------------------------------------------------------
+
+def _merge_rematch_passes(
+    name_hits: Dict[Tuple[str, str], Dict[str, Any]],
+    llm_results: List[Dict],
+) -> Tuple[List[Dict], Dict[str, int]]:
+    """
+    Combine the fuzzy name-match results with the semantic LLM results
+    into a single resolved list.  Each resolved entry carries
+    ``rematch_type`` in {"N", "S", "B"}:
+      N = fuzzy name pass only
+      S = semantic LLM pass only
+      B = both agreed on the same CDM target
+
+    When both passes find a match but pick different CDM targets, the
+    LLM result wins (it has broader CDM context) and is tagged "S".
+
+    "unmapped" LLM dispositions are passed through unchanged so their
+    reason_category can still be written back to the gaps file.
+    """
+    counts = {"N": 0, "S": 0, "B": 0, "unmapped": 0}
+
+    # Index LLM results by (src_type, src_attr)
+    llm_by_key: Dict[Tuple[str, str], Dict] = {}
+    for r in llm_results:
+        key = (r.get("source_type", ""), r.get("source_attribute", ""))
+        llm_by_key[key] = r
+
+    merged: List[Dict] = []
+    keys_emitted: set = set()
+
+    # Walk the union of keys seen by either pass
+    for key in sorted(set(llm_by_key.keys()) | set(name_hits.keys())):
+        src_type, src_attr = key
+        llm_r = llm_by_key.get(key)
+        name_r = name_hits.get(key)
+        keys_emitted.add(key)
+
+        # LLM said unmapped -> if name pass found something, take the name hit
+        if llm_r and llm_r.get("disposition") == "unmapped":
+            if name_r:
+                merged.append({
+                    "source_type":    src_type,
+                    "source_attribute": src_attr,
+                    "source_entity":  llm_r.get("source_entity", ""),
+                    "disposition":    "mapped",
+                    "cdm_entity":     name_r["cdm_entity"],
+                    "cdm_attribute":  name_r["cdm_attribute"],
+                    "confidence":     "medium",
+                    "reasoning":      name_r["reasoning"],
+                    "rematch_type":   "N",
+                })
+                counts["N"] += 1
+            else:
+                merged.append(llm_r)
+                counts["unmapped"] += 1
+            continue
+
+        # LLM said mapped
+        if llm_r and llm_r.get("disposition") == "mapped":
+            if name_r and (
+                (name_r["cdm_entity"], name_r["cdm_attribute"]) ==
+                (llm_r.get("cdm_entity", ""), llm_r.get("cdm_attribute", ""))
+            ):
+                # Both agree -> B
+                entry = dict(llm_r)
+                entry["rematch_type"] = "B"
+                merged.append(entry)
+                counts["B"] += 1
+            else:
+                # Only LLM (or they disagree; LLM wins)
+                entry = dict(llm_r)
+                entry["rematch_type"] = "S"
+                merged.append(entry)
+                counts["S"] += 1
+            continue
+
+        # LLM result absent but name pass found one
+        if name_r:
+            merged.append({
+                "source_type":      src_type,
+                "source_attribute": src_attr,
+                "source_entity":    "",
+                "disposition":      "mapped",
+                "cdm_entity":       name_r["cdm_entity"],
+                "cdm_attribute":    name_r["cdm_attribute"],
+                "confidence":       "medium",
+                "reasoning":        name_r["reasoning"],
+                "rematch_type":     "N",
+            })
+            counts["N"] += 1
+
+    return merged, counts
+
+
+# ---------------------------------------------------------------------------
 # Apply resolved mappings back to CDM
 # ---------------------------------------------------------------------------
 
@@ -264,14 +488,19 @@ def _apply_rematch_to_cdm(
     """
     Add source_lineage entries to CDM attributes for successfully re-matched fields.
 
-    Because of deduplication, one resolved result may represent multiple source
-    entities (e.g. PaidHistory AND Revhistory both have submit_pharm_num).
-    We fan the mapping out to all original entities.
+    Each resolved result should carry ``rematch_type`` ("N", "S", or "B")
+    indicating which rematch pass(es) produced the mapping:
+      N = fuzzy name-similarity pass only
+      S = semantic LLM pass only
+      B = both passes agreed on the same CDM target
+
+    Because of deduplication, one resolved result may represent multiple
+    source entities (e.g. PaidHistory AND Revhistory both have
+    submit_pharm_num).  We fan the mapping out to all original entities.
 
     Returns:
         updated CDM, count of lineage entries added
     """
-    # Build entity + attribute lookup
     entity_lookup: Dict[str, Dict] = {
         e.get("entity_name", "").lower(): e
         for e in cdm.get("entities", [])
@@ -289,6 +518,7 @@ def _apply_rematch_to_cdm(
         src_attr        = result.get("source_attribute", "")
         confidence      = result.get("confidence", "high")
         reasoning       = result.get("reasoning", "")
+        rematch_type    = result.get("rematch_type", "S")  # default to S for backward compat
 
         if not cdm_entity_name or not cdm_attr_name:
             continue
@@ -297,7 +527,6 @@ def _apply_rematch_to_cdm(
         if not cdm_entity:
             continue
 
-        # Find the CDM attribute
         cdm_attr = next(
             (a for a in cdm_entity.get("attributes", [])
              if a.get("attribute_name", "").lower() == cdm_attr_name.lower()),
@@ -306,13 +535,11 @@ def _apply_rematch_to_cdm(
         if not cdm_attr:
             continue
 
-        # Ensure source_lineage key exists
         if "source_lineage" not in cdm_attr:
             cdm_attr["source_lineage"] = {}
         if src_type not in cdm_attr["source_lineage"]:
             cdm_attr["source_lineage"][src_type] = []
 
-        # Fan out to all original source entities for this (source_type, attr_name)
         key = str((src_type, src_attr))
         originals = attr_to_originals.get(key, [{"source_entity": result.get("source_entity", "")}])
 
@@ -321,10 +548,10 @@ def _apply_rematch_to_cdm(
                 "source_entity":    orig.get("source_entity", ""),
                 "source_attribute": src_attr,
                 "rematch":          True,
+                "rematch_type":     rematch_type,
                 "confidence":       confidence,
-                "reasoning":        reasoning
+                "reasoning":        reasoning,
             }
-            # Avoid exact duplicates
             if lineage_entry not in cdm_attr["source_lineage"][src_type]:
                 cdm_attr["source_lineage"][src_type].append(lineage_entry)
                 applied += 1
@@ -466,13 +693,20 @@ def run_rematch_postprocess(
     # --- Build CDM catalog ---
     cdm_catalog = _build_rematch_catalog(cdm)
 
+    # --- Fuzzy name-match pre-pass (deterministic, no LLM) ---
+    name_hits = _fuzzy_name_match_pass(unique_fields, cdm)
+    print(
+        f"   Fuzzy name pre-pass: {len(name_hits)} of {len(unique_fields)} "
+        f"unique attrs matched (threshold={DEFAULT_NAME_SIMILARITY_THRESHOLD:.2f})"
+    )
+
     # --- Batch and call ---
     batches = [
         unique_fields[i: i + REMATCH_BATCH_SIZE]
         for i in range(0, len(unique_fields), REMATCH_BATCH_SIZE)
     ]
     n_batches = len(batches)
-    print(f"   Batches: {n_batches} × {REMATCH_BATCH_SIZE} attrs")
+    print(f"   LLM batches: {n_batches} × {REMATCH_BATCH_SIZE} attrs")
 
     if dry_run:
         print(f"\n{'='*60}")
@@ -496,8 +730,8 @@ def run_rematch_postprocess(
         print(f"{'='*60}")
         return cdm
 
-    # --- Live run ---
-    all_results: List[Dict] = []
+    # --- Live LLM run ---
+    llm_results: List[Dict] = []
     total_mapped = 0
 
     for i, batch in enumerate(batches, 1):
@@ -510,18 +744,26 @@ def run_rematch_postprocess(
         )
         mapped_in_batch = sum(1 for r in results if r.get("disposition") == "mapped")
         total_mapped += mapped_in_batch
-        all_results.extend(results)
+        llm_results.extend(results)
         print(f" mapped: {mapped_in_batch}/{len(batch)}")
 
-    print(f"\n   Re-match complete: {total_mapped} resolved of {len(unique_fields)} unique attrs")
+    print(f"\n   LLM pass complete: {total_mapped} mapped of {len(unique_fields)} unique attrs")
+
+    # --- Merge name + LLM results; tag each with rematch_type N/S/B ---
+    merged_results, counts = _merge_rematch_passes(name_hits, llm_results)
+    print(
+        f"   Merged rematch results — "
+        f"N={counts['N']}, S={counts['S']}, B={counts['B']}, "
+        f"LLM-unmapped-with-reason={counts['unmapped']}"
+    )
 
     # --- Apply to CDM ---
-    cdm, lineage_added = _apply_rematch_to_cdm(cdm, all_results, attr_to_originals)
+    cdm, lineage_added = _apply_rematch_to_cdm(cdm, merged_results, attr_to_originals)
     print(f"   Lineage entries added to CDM: {lineage_added}")
 
     # --- Update gaps file ---
     gaps, resolved_count, still_unmapped = _update_gaps_file(
-        gaps, all_results, attr_to_originals
+        gaps, merged_results, attr_to_originals
     )
     print(f"   Removed from unmapped:        {resolved_count}")
     print(f"   Remaining unmapped:           {still_unmapped}")

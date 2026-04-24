@@ -65,12 +65,23 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
         elif attr.precision:
             size = f"{attr.precision},{attr.scale or 0}"
 
-        # Rematch flag — True if any lineage entry has rematch=True
-        is_rematch = any(
-            mapping.get("rematch") is True
-            for mappings in attr.source_lineage.values()
-            for mapping in (mappings if isinstance(mappings, list) else [])
-        )
+        # Rematch flag — combine rematch_type across the attribute's
+        # lineage entries.  Legacy entries that only set rematch=True are
+        # treated as "S" (semantic) since they predate the name-match pass.
+        rematch_types: set = set()
+        for mappings in attr.source_lineage.values():
+            for mapping in (mappings if isinstance(mappings, list) else []):
+                if mapping.get("rematch") is True:
+                    rematch_types.add((mapping.get("rematch_type") or "S").upper())
+        if not rematch_types:
+            rematch_display = ""
+        elif rematch_types == {"N"}:
+            rematch_display = "N"
+        elif rematch_types == {"S"}:
+            rematch_display = "S"
+        else:
+            rematch_display = "B"
+        is_rematch = bool(rematch_display)
 
         row_data = [
             attr.entity_name,
@@ -85,7 +96,7 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
             attr.classification or "",
             "Y" if attr.is_pii else "",
             "Y" if attr.is_phi else "",
-            "R" if is_rematch else "",
+            rematch_display,
         ]
 
         if has_field_codes:
