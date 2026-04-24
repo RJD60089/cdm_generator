@@ -101,9 +101,15 @@ def generate_excel_cdm(
     print(f"      - Data_Dictionary_Lab")
     create_data_dictionary_lab_tab(wb, extractor)
 
-    # 3c. Candidate CDEs - placed right after Data_Dictionary_Lab so the
-    # CDE list is discoverable alongside the attribute-level tabs and can
-    # be referenced by the Mapping tab further down the workbook.
+    # 3c. Mapping — Collibra source-to-target mapping, placed
+    # immediately after Data_Dictionary_Lab so attribute-level tabs
+    # stay grouped.
+    print(f"      - Mapping")
+    create_mapping_tab(wb, extractor, config)
+
+    # 3d. Candidate CDEs - placed after Mapping so the CDE list sits
+    # alongside the attribute-level tabs and can be referenced by the
+    # Mapping tab.
     print(f"      - Candidate_CDEs")
     create_cde_tab(wb, extractor)
 
@@ -146,10 +152,6 @@ def generate_excel_cdm(
     # 13. ERD
     print(f"      - ERD")
     create_erd_tab(wb, erd_url)
-
-    # 14. Mapping — Collibra source-to-target mapping (last tab)
-    print(f"      - Mapping")
-    create_mapping_tab(wb, extractor, config)
 
     # Save workbook
     output_path.parent.mkdir(parents=True, exist_ok=True)

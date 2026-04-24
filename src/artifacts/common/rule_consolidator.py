@@ -2,16 +2,22 @@
 """
 AI-driven business-rule consolidation.
 
-Reads business + validation rules from a Full CDM, groups by entity, then
-asks the LLM to consolidate per entity: eliminate duplicates and near-
-duplicates, flag conflicts (nullable vs non-nullable, size 5 vs 10, etc.),
-and produce an Included set (consolidated rules) and a Rejected set
-(duplicates or lower-quality versions) with rationale.
+Processes ONE attribute per LLM call. For every attribute with at least
+one business or validation rule, the LLM receives only that attribute's
+rules, consolidates duplicates / near-duplicates, flags conflicts
+(nullable vs non-nullable, size 5 vs 10, etc.), and returns Included and
+Rejected sets.
+
+Per-attribute calls give:
+  - Small, focused prompts (faster and higher quality than per-entity).
+  - Per-attribute error isolation — one failure does not lose the rest
+    of the entity.
+  - Natural parallelism if we ever add it.
 
 Output JSON lives at:
   {outdir}/full_cdm/business_rules_consolidated_{domain}_{timestamp}.json
 
-Schema:
+Schema (unchanged — grouped by entity so the Excel tab keeps working):
 {
   "generated_date": "ISO",
   "domain": "...",
@@ -25,7 +31,7 @@ Schema:
           "consolidated_rule": "...",
           "source_rule_ids": [1, 3],
           "sources": ["fhir", "ncpdp"],
-          "conflict_type": "NULL | SIZE | TYPE | REQ | NONE",
+          "conflict_type": "NULL | SIZE | TYPE | REQ | OTHER | NONE",
           "conflict_detail": "...",
           "rationale": "..."
         }
@@ -47,6 +53,7 @@ Schema:
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -61,37 +68,41 @@ SYSTEM_PROMPT = (
 )
 
 
-USER_PROMPT_TEMPLATE = """Consolidate the business rules below for entity: {entity_name}
+USER_PROMPT_TEMPLATE = """Consolidate the business rules below for a single CDM attribute.
 
-For each attribute, review every rule (each with a numeric id, text, and
-source systems). Produce two sets:
+ENTITY: {entity_name}
+ATTRIBUTE: {attribute_name}
 
-INCLUDED — one entry per distinct, meaningful rule. If multiple source rules
+Review every rule (each with a numeric id, text, and source systems). Produce
+two sets for THIS attribute only:
+
+INCLUDED — one entry per distinct, meaningful rule. When multiple source rules
 say the same thing or are near-duplicates, merge them into a single
 consolidated rule that preserves the detail (exact field lengths, thresholds,
 allowed-value lists, temporal constraints). List the ids of the source rules
 that were merged, and the union of their sources.
 
-REJECTED — source rules that were dropped as duplicates, near-duplicates, or
-lower-quality restatements. Reference the id of the rule they were merged
-into via reason "duplicate_of_<id>" or "near_duplicate". Conflicting rules
-should NOT be rejected — keep them in INCLUDED and flag the conflict.
+REJECTED — source rules dropped as duplicates, near-duplicates, or lower-
+quality restatements. Reference the id of the rule they were merged into via
+reason "duplicate_of_<id>" or "near_duplicate". Conflicting rules should NOT
+be rejected — keep them in INCLUDED and flag the conflict.
 
-CONFLICTS — when two source rules on the SAME attribute disagree (e.g.,
-nullable vs non-nullable, max length 5 vs 10, required vs optional, numeric
-vs string), keep BOTH in INCLUDED and set:
+CONFLICTS — when two source rules disagree (nullable vs non-nullable, max
+length 5 vs 10, required vs optional, numeric vs string), keep BOTH in
+INCLUDED and set:
   conflict_type: one of "NULL" (nullability), "SIZE" (length/precision),
                  "TYPE" (data type), "REQ" (required vs optional), "OTHER"
   conflict_detail: a brief description of the disagreement (e.g.
                    "fhir says max length 10, ncpdp says max length 15")
 Rules without a conflict have conflict_type "NONE" and empty conflict_detail.
 
-Required JSON output — do not change the keys:
+Required JSON output — do not change the keys. The attribute_name field must
+be "{attribute_name}" for every entry:
 {{
-  "entity_name": "{entity_name}",
+  "attribute_name": "{attribute_name}",
   "included": [
     {{
-      "attribute_name": "...",
+      "attribute_name": "{attribute_name}",
       "consolidated_rule": "...",
       "source_rule_ids": [<int>, ...],
       "sources": ["..."],
@@ -102,7 +113,7 @@ Required JSON output — do not change the keys:
   ],
   "rejected": [
     {{
-      "attribute_name": "...",
+      "attribute_name": "{attribute_name}",
       "rule": "...",
       "sources": ["..."],
       "source_rule_id": <int>,
@@ -111,23 +122,23 @@ Required JSON output — do not change the keys:
   ]
 }}
 
-RULES FOR ENTITY {entity_name}:
+RULES FOR {entity_name}.{attribute_name}:
 {rules_json}
 """
 
 
-def _collect_entity_rules(cdm: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _collect_attribute_rules(cdm: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Group business + validation rules per entity, with stable numeric ids
-    so the LLM can reference them.
+    Flatten the CDM into a list of (entity, attribute, rules) units — one
+    entry per attribute that has at least one rule. Assigns stable
+    numeric ids to each rule so the LLM can reference them.
     """
-    grouped: List[Dict[str, Any]] = []
+    units: List[Dict[str, Any]] = []
     next_id = 1
     for entity in cdm.get("entities", []):
         entity_name = entity.get("entity_name", "")
-        attrs_out = []
         for attr in entity.get("attributes", []):
-            rules = []
+            rules: List[Dict[str, Any]] = []
             for r in attr.get("business_rules", []) or []:
                 if isinstance(r, dict):
                     text = r.get("rule", "")
@@ -151,13 +162,12 @@ def _collect_entity_rules(cdm: Dict[str, Any]) -> List[Dict[str, Any]]:
                 rules.append({"id": next_id, "rule": text, "sources": sources, "type": "validation"})
                 next_id += 1
             if rules:
-                attrs_out.append({
+                units.append({
+                    "entity_name": entity_name,
                     "attribute_name": attr.get("attribute_name", ""),
                     "rules": rules,
                 })
-        if attrs_out:
-            grouped.append({"entity_name": entity_name, "attributes": attrs_out})
-    return grouped
+    return units
 
 
 def _parse_json_response(response: str) -> Dict[str, Any]:
@@ -173,31 +183,41 @@ def _parse_json_response(response: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
-def _consolidate_entity(
+def _consolidate_attribute(
     llm: LLMClient,
     entity_name: str,
-    attributes: List[Dict[str, Any]],
+    attribute_name: str,
+    rules: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Call the LLM once for a single entity."""
+    """Call the LLM once for a single attribute and return its consolidation."""
     prompt = USER_PROMPT_TEMPLATE.format(
         entity_name=entity_name,
-        rules_json=json.dumps(attributes, indent=2),
+        attribute_name=attribute_name,
+        rules_json=json.dumps(rules, indent=2),
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
     response, _ = llm.chat(messages)
+
     try:
         parsed = _parse_json_response(response)
     except json.JSONDecodeError as e:
-        print(f"   ⚠️  Failed to parse LLM response for {entity_name}: {e}")
-        return {"entity_name": entity_name, "included": [], "rejected": [], "parse_error": str(e)}
+        print(f"   ⚠️  Failed to parse LLM response for {entity_name}.{attribute_name}: {e}")
+        return {"included": [], "rejected": [], "parse_error": str(e)}
 
-    parsed.setdefault("entity_name", entity_name)
-    parsed.setdefault("included", [])
-    parsed.setdefault("rejected", [])
-    return parsed
+    included = parsed.get("included", []) or []
+    rejected = parsed.get("rejected", []) or []
+
+    # Ensure every entry carries the attribute_name (the LLM sometimes omits it
+    # or uses a different casing).
+    for item in included:
+        item["attribute_name"] = attribute_name
+    for item in rejected:
+        item["attribute_name"] = attribute_name
+
+    return {"included": included, "rejected": rejected}
 
 
 def run_rule_consolidation(
@@ -207,7 +227,7 @@ def run_rule_consolidation(
     dry_run: bool = False,
 ) -> Optional[Path]:
     """
-    Run AI consolidation of business rules for every entity in the Full CDM.
+    Run AI consolidation of business rules, one attribute per LLM call.
 
     Args:
         cdm_path: Path to the Full CDM JSON.
@@ -216,13 +236,13 @@ def run_rule_consolidation(
         dry_run: If True, write the prompts to disk and skip LLM calls.
 
     Returns:
-        Path to the consolidation JSON (or the prompts directory when dry_run).
+        Path to the consolidation JSON (or the prompts directory in dry-run).
     """
     with open(cdm_path, "r", encoding="utf-8") as f:
         cdm = json.load(f)
 
-    grouped = _collect_entity_rules(cdm)
-    if not grouped:
+    units = _collect_attribute_rules(cdm)
+    if not units:
         print("   ℹ️  No business rules found in CDM — nothing to consolidate.")
         return None
 
@@ -232,32 +252,51 @@ def run_rule_consolidation(
     domain_safe = domain.lower().replace(" ", "_")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Dry-run: write one prompt file per attribute
     if dry_run:
         prompts_dir = full_cdm_dir / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)
-        for group in grouped:
+        for unit in units:
             prompt = USER_PROMPT_TEMPLATE.format(
-                entity_name=group["entity_name"],
-                rules_json=json.dumps(group["attributes"], indent=2),
+                entity_name=unit["entity_name"],
+                attribute_name=unit["attribute_name"],
+                rules_json=json.dumps(unit["rules"], indent=2),
             )
-            safe_entity = group["entity_name"].lower().replace(" ", "_")
-            (prompts_dir / f"rule_consolidation_{safe_entity}_{timestamp}.txt").write_text(
+            safe = f"{unit['entity_name']}_{unit['attribute_name']}".lower().replace(" ", "_")
+            (prompts_dir / f"rule_consolidation_{safe}_{timestamp}.txt").write_text(
                 prompt, encoding="utf-8"
             )
-        print(f"   ✓ Dry-run: {len(grouped)} consolidation prompts saved to {prompts_dir}")
+        print(f"   ✓ Dry-run: {len(units)} attribute prompts saved to {prompts_dir}")
         return prompts_dir
 
     if llm is None:
         raise ValueError("LLM client is required when dry_run is False")
 
-    print(f"   🤖 Consolidating rules for {len(grouped)} entities...")
-    entity_results: List[Dict[str, Any]] = []
-    for i, group in enumerate(grouped, 1):
-        entity_name = group["entity_name"]
-        print(f"      [{i}/{len(grouped)}] {entity_name}")
-        entity_results.append(
-            _consolidate_entity(llm, entity_name, group["attributes"])
-        )
+    # Count distinct entities touched so the progress log stays meaningful
+    unique_entities = {u["entity_name"] for u in units}
+    print(
+        f"   🤖 Consolidating rules for {len(units)} attributes "
+        f"across {len(unique_entities)} entities..."
+    )
+
+    # Collect per-attribute results, grouped by entity in insertion order for
+    # stable output.
+    entities_acc: "OrderedDict[str, Dict[str, List[Dict[str, Any]]]]" = OrderedDict()
+    for i, unit in enumerate(units, 1):
+        ent = unit["entity_name"]
+        attr = unit["attribute_name"]
+        print(f"      [{i}/{len(units)}] {ent}.{attr}")
+
+        result = _consolidate_attribute(llm, ent, attr, unit["rules"])
+
+        bucket = entities_acc.setdefault(ent, {"included": [], "rejected": []})
+        bucket["included"].extend(result.get("included", []))
+        bucket["rejected"].extend(result.get("rejected", []))
+
+    entity_results = [
+        {"entity_name": name, "included": data["included"], "rejected": data["rejected"]}
+        for name, data in entities_acc.items()
+    ]
 
     output = {
         "generated_date": datetime.now().isoformat(),
