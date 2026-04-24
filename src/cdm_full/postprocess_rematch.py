@@ -233,12 +233,21 @@ def _build_cdm_identity_index(cdm: Dict) -> List[Tuple[str, str, str]]:
     Flatten every CDM attribute into the identity strings a source field
     could plausibly match on.  Returns a list of
       (cdm_entity_name, cdm_attribute_name, identity_string_lower)
-    with one row per identity string (attribute_name, each ncpdp_field_code,
-    each edw_field_code).
+    with one row per distinct identity per CDM attribute.
 
-    The same (entity, attribute) pair appears multiple times in this list
-    if it carries multiple field codes — that is intentional so a source
-    field only has to hit ANY identity to be considered.
+    Identity strings for each CDM attribute are drawn from:
+      - its own attribute_name
+      - every entry in its ncpdp_field_codes list
+      - every entry in its edw_field_codes list
+      - every source_attribute already in its source_lineage (any source
+        type).  This lets an unmapped field from a sibling table match
+        back to the same CDM attribute when the source column name was
+        already mapped from a peer table - e.g. unmapped Revhistory.f327
+        hits the identity "f327" that PaidHistory.F327 contributed to
+        carrier_code, regardless of case or field-code enrichment.
+
+    Duplicates per (entity, attribute) are deduped so the same identity
+    contributes only once per attribute.
     """
     idx: List[Tuple[str, str, str]] = []
     for entity in cdm.get("entities", []):
@@ -247,15 +256,28 @@ def _build_cdm_identity_index(cdm: Dict) -> List[Tuple[str, str, str]]:
             aname = attr.get("attribute_name", "")
             if not aname:
                 continue
-            idx.append((ent, aname, aname.lower()))
+
+            seen: set = set()
+
+            def _add(s: str) -> None:
+                s = (s or "").strip().lower()
+                if s and s not in seen:
+                    seen.add(s)
+                    idx.append((ent, aname, s))
+
+            _add(aname)
             for code in attr.get("ncpdp_field_codes", []) or []:
-                c = (code or "").strip().lower()
-                if c:
-                    idx.append((ent, aname, c))
+                _add(code)
             for code in attr.get("edw_field_codes", []) or []:
-                c = (code or "").strip().lower()
-                if c:
-                    idx.append((ent, aname, c))
+                _add(code)
+
+            # Already-mapped source attributes from every source type
+            for entries in (attr.get("source_lineage") or {}).values():
+                if not isinstance(entries, list):
+                    continue
+                for e in entries:
+                    if isinstance(e, dict):
+                        _add(e.get("source_attribute", ""))
     return idx
 
 
