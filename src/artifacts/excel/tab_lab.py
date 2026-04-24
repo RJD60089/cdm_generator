@@ -141,7 +141,7 @@ def create_data_dictionary_lab_tab(
         "Classification", "PII", "PHI", "Rematch",
     ]
     if has_field_codes:
-        tail_headers += ["NCPDP Field Code", "EDW F-Code"]
+        tail_headers += ["NCPDP Field Code", "EDW"]
     for anc_src in ancillary_sources:
         display_name = anc_src.replace("ancillary-", "").replace("-", " ").title()
         tail_headers.append(f"Ancillary {display_name}")
