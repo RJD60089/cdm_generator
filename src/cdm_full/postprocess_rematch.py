@@ -49,6 +49,27 @@ MAX_CDM_ATTR_DESC = 120      # Chars to include per CDM attribute description
 DEFAULT_NAME_SIMILARITY_THRESHOLD = 0.55
 DEFAULT_NAME_TIE_MARGIN = 0.05
 
+# Reason categories that the fuzzy name pass is allowed to "rescue".
+# These were previously dispositioned as unmapped by the LLM, but the
+# fuzzy pass may still find a legitimate match via attribute name or
+# field-code identity. Other categories (technical_metadata, cross_domain,
+# excluded_by_design) are structural rejections and stay filtered out.
+_RESCUE_REASON_PREFIXES = ("[no_cdm_equivalent]", "[bare_code_stub]")
+
+
+def _is_rescue_eligible(field: Dict) -> bool:
+    """Fuzzy-pass candidacy. No reason OR a rescue-eligible reason."""
+    reason = field.get("reason", "") or ""
+    if not reason:
+        return True
+    return reason.startswith(_RESCUE_REASON_PREFIXES)
+
+
+def _is_llm_eligible(field: Dict) -> bool:
+    """LLM-pass candidacy. Only fields with no prior reason — avoid re-
+    asking the LLM about anything it has already dispositioned."""
+    return not field.get("reason")
+
 
 # ---------------------------------------------------------------------------
 # Prompt
@@ -678,32 +699,49 @@ def run_rematch_postprocess(
     unmapped_fields = gaps.get("unmapped_fields", [])
     print(f"   Total unmapped in gaps file: {len(unmapped_fields)}")
 
-    # --- Filter to no-reason unmapped only ---
-    no_reason = [f for f in unmapped_fields if not f.get("reason")]
-    print(f"   No-reason unmapped (re-match candidates): {len(no_reason)}")
+    # --- Split candidate sets ---
+    # Fuzzy pass is allowed to rescue previously-dispositioned fields
+    # that fall under no_cdm_equivalent or bare_code_stub categories.
+    # LLM pass only re-examines strictly no-reason fields (to avoid
+    # paying for a second opinion on fields it already explained).
+    fuzzy_candidates = [f for f in unmapped_fields if _is_rescue_eligible(f)]
+    llm_candidates   = [f for f in unmapped_fields if _is_llm_eligible(f)]
 
-    if not no_reason:
-        print(f"   ✓ Nothing to re-match — all unmapped fields have explicit reasons")
+    print(
+        f"   Fuzzy candidates (no-reason + rescue categories): "
+        f"{len(fuzzy_candidates)}"
+    )
+    print(
+        f"   LLM candidates  (no-reason only):                 "
+        f"{len(llm_candidates)}"
+    )
+
+    if not fuzzy_candidates and not llm_candidates:
+        print(f"   ✓ Nothing to re-match — all unmapped fields have structural reasons")
         return cdm
 
-    # --- Deduplicate ---
-    unique_fields, attr_to_originals = _deduplicate_unmapped(no_reason)
-    print(f"   Unique attribute names after deduplication: {len(unique_fields)}")
+    # --- Deduplicate each set ---
+    fuzzy_unique, attr_to_originals = _deduplicate_unmapped(fuzzy_candidates)
+    llm_unique,   _                 = _deduplicate_unmapped(llm_candidates)
+    print(
+        f"   Unique attr names after dedup — fuzzy: {len(fuzzy_unique)}, "
+        f"LLM: {len(llm_unique)}"
+    )
 
     # --- Build CDM catalog ---
     cdm_catalog = _build_rematch_catalog(cdm)
 
     # --- Fuzzy name-match pre-pass (deterministic, no LLM) ---
-    name_hits = _fuzzy_name_match_pass(unique_fields, cdm)
+    name_hits = _fuzzy_name_match_pass(fuzzy_unique, cdm)
     print(
-        f"   Fuzzy name pre-pass: {len(name_hits)} of {len(unique_fields)} "
+        f"   Fuzzy name pre-pass: {len(name_hits)} of {len(fuzzy_unique)} "
         f"unique attrs matched (threshold={DEFAULT_NAME_SIMILARITY_THRESHOLD:.2f})"
     )
 
-    # --- Batch and call ---
+    # --- Batch and call (LLM pass uses narrower no-reason set) ---
     batches = [
-        unique_fields[i: i + REMATCH_BATCH_SIZE]
-        for i in range(0, len(unique_fields), REMATCH_BATCH_SIZE)
+        llm_unique[i: i + REMATCH_BATCH_SIZE]
+        for i in range(0, len(llm_unique), REMATCH_BATCH_SIZE)
     ]
     n_batches = len(batches)
     print(f"   LLM batches: {n_batches} × {REMATCH_BATCH_SIZE} attrs")
@@ -712,21 +750,24 @@ def run_rematch_postprocess(
         print(f"\n{'='*60}")
         print("REMATCH PROMPT — DRY RUN (first batch only)")
         print(f"{'='*60}")
-        field_lines = [
-            " | ".join([
-                f.get("source_type", ""),
-                f.get("source_entity", ""),
-                f.get("source_attribute", ""),
-                (f.get("description") or "")[:80]
-            ])
-            for f in batches[0]
-        ]
-        preview = REMATCH_PROMPT.format(
-            domain=domain or cdm.get("domain", ""),
-            cdm_catalog=cdm_catalog[:1000] + "\n... [truncated] ...",
-            source_fields="\n".join(field_lines)
-        )
-        print(preview[:3000])
+        if not batches:
+            print("   (No LLM batches — no fields eligible for LLM pass.)")
+        else:
+            field_lines = [
+                " | ".join([
+                    f.get("source_type", ""),
+                    f.get("source_entity", ""),
+                    f.get("source_attribute", ""),
+                    (f.get("description") or "")[:80]
+                ])
+                for f in batches[0]
+            ]
+            preview = REMATCH_PROMPT.format(
+                domain=domain or cdm.get("domain", ""),
+                cdm_catalog=cdm_catalog[:1000] + "\n... [truncated] ...",
+                source_fields="\n".join(field_lines)
+            )
+            print(preview[:3000])
         print(f"{'='*60}")
         return cdm
 
@@ -747,7 +788,10 @@ def run_rematch_postprocess(
         llm_results.extend(results)
         print(f" mapped: {mapped_in_batch}/{len(batch)}")
 
-    print(f"\n   LLM pass complete: {total_mapped} mapped of {len(unique_fields)} unique attrs")
+    print(
+        f"\n   LLM pass complete: {total_mapped} mapped of {len(llm_unique)} "
+        f"unique attrs"
+    )
 
     # --- Merge name + LLM results; tag each with rematch_type N/S/B ---
     merged_results, counts = _merge_rematch_passes(name_hits, llm_results)
