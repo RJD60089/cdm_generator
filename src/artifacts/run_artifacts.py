@@ -126,6 +126,7 @@ def run_artifact_generation(
     dialect: str = "sqlserver",
     schema: str = "dbo",
     run_rule_consolidation_flag: bool = False,
+    rule_consolidation_workers: int = 1,
     llm=None,
     dry_run: bool = False,
 ) -> Dict[str, Path]:
@@ -184,6 +185,7 @@ def run_artifact_generation(
                 outdir=outdir,
                 llm=llm,
                 dry_run=dry_run,
+                max_workers=rule_consolidation_workers,
             )
         except Exception as e:
             print(f"   ⚠️  Rule consolidation failed: {e}")
@@ -314,11 +316,23 @@ def interactive_artifact_generation(
 
     # AI consolidation is optional — only prompt if LLM is available OR dry-run
     run_rule_consolidation_flag = False
+    rule_consolidation_workers = 1
     if llm is not None or dry_run:
         run_rule_consolidation_flag = prompt_yes_no(
             "Run AI Business Rules Consolidation (populates Business_Rules_Consolidated tab)?",
             default="Y",
         )
+        if run_rule_consolidation_flag and not dry_run:
+            # Parallel workers: 1 = sequential.  Tier 4+ handles 16-24 safely;
+            # Tier 1-2 should stick to 4-8 to avoid rate-limit 429s.
+            raw = input(
+                "   Concurrent LLM workers for consolidation [1]: "
+            ).strip() or "1"
+            try:
+                rule_consolidation_workers = max(1, int(raw))
+            except ValueError:
+                print(f"   ⚠️  Invalid worker count '{raw}' — falling back to sequential (1)")
+                rule_consolidation_workers = 1
 
     if not any([
         generate_excel_flag, generate_ddl_word_flag, generate_ddl_sql_flag,
@@ -351,6 +365,7 @@ def interactive_artifact_generation(
         dialect=dialect,
         schema=schema,
         run_rule_consolidation_flag=run_rule_consolidation_flag,
+        rule_consolidation_workers=rule_consolidation_workers,
         llm=llm,
         dry_run=dry_run,
     )

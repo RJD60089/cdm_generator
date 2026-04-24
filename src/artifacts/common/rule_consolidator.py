@@ -53,7 +53,9 @@ Schema (unchanged — grouped by entity so the Excel tab keeps working):
 from __future__ import annotations
 
 import json
+import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -225,6 +227,7 @@ def run_rule_consolidation(
     outdir: Path,
     llm: Optional[LLMClient],
     dry_run: bool = False,
+    max_workers: int = 1,
 ) -> Optional[Path]:
     """
     Run AI consolidation of business rules, one attribute per LLM call.
@@ -234,6 +237,12 @@ def run_rule_consolidation(
         outdir: Base output directory (writes to outdir/full_cdm/).
         llm: LLM client. Required when dry_run is False.
         dry_run: If True, write the prompts to disk and skip LLM calls.
+        max_workers: Number of concurrent LLM calls. 1 = strictly
+            sequential (preserves prior behaviour). Higher values use a
+            ThreadPoolExecutor — LLM calls are I/O bound so threads are
+            safe.  Safe ceiling depends on OpenAI tier (Tier 4 handles
+            16-24 workers comfortably).  Failed calls retry per-thread
+            via the existing tenacity retry on LLMClient.chat().
 
     Returns:
         Path to the consolidation JSON (or the prompts directory in dry-run).
@@ -274,22 +283,60 @@ def run_rule_consolidation(
 
     # Count distinct entities touched so the progress log stays meaningful
     unique_entities = {u["entity_name"] for u in units}
+    workers_display = max(1, int(max_workers))
     print(
         f"   🤖 Consolidating rules for {len(units)} attributes "
-        f"across {len(unique_entities)} entities..."
+        f"across {len(unique_entities)} entities "
+        f"({'sequential' if workers_display == 1 else f'{workers_display} parallel workers'})..."
     )
 
-    # Collect per-attribute results, grouped by entity in insertion order for
-    # stable output.
+    # Collect per-attribute results.  We seed the OrderedDict with every
+    # entity in the order they appear so the output JSON is deterministic
+    # regardless of the order the parallel workers finish in.
     entities_acc: "OrderedDict[str, Dict[str, List[Dict[str, Any]]]]" = OrderedDict()
-    for i, unit in enumerate(units, 1):
+    for u in units:
+        entities_acc.setdefault(u["entity_name"], {"included": [], "rejected": []})
+
+    # Thread-safe progress counter and log lock
+    progress_lock = threading.Lock()
+    log_lock = threading.Lock()
+    completed = {"n": 0}
+    total = len(units)
+
+    def _process(unit: Dict[str, Any]) -> Dict[str, Any]:
+        """Worker body: run one consolidation, return aggregated result dict."""
         ent = unit["entity_name"]
         attr = unit["attribute_name"]
-        print(f"      [{i}/{len(units)}] {ent}.{attr}")
+        try:
+            result = _consolidate_attribute(llm, ent, attr, unit["rules"])
+        except Exception as e:
+            # Isolate per-attribute failures so one bad call doesn't kill the run
+            with log_lock:
+                print(f"   ⚠️  {ent}.{attr} failed: {e}")
+            result = {"included": [], "rejected": [], "error": str(e)}
+        with progress_lock:
+            completed["n"] += 1
+            idx = completed["n"]
+        with log_lock:
+            print(f"      [{idx}/{total}] {ent}.{attr}")
+        return {"entity_name": ent, "result": result}
 
-        result = _consolidate_attribute(llm, ent, attr, unit["rules"])
+    if workers_display == 1:
+        # Sequential path — preserves prior behaviour exactly
+        outputs = [_process(u) for u in units]
+    else:
+        # Parallel path — I/O bound, threads release GIL on network waits
+        outputs = []
+        with ThreadPoolExecutor(max_workers=workers_display) as pool:
+            futures = [pool.submit(_process, u) for u in units]
+            for fut in as_completed(futures):
+                outputs.append(fut.result())
 
-        bucket = entities_acc.setdefault(ent, {"included": [], "rejected": []})
+    # Aggregate into entities_acc (order-stable via pre-seeding above)
+    for item in outputs:
+        ent = item["entity_name"]
+        result = item["result"]
+        bucket = entities_acc[ent]
         bucket["included"].extend(result.get("included", []))
         bucket["rejected"].extend(result.get("rejected", []))
 
