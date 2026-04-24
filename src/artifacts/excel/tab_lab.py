@@ -13,10 +13,13 @@ Two worksheets:
     immediately after "Description".
 """
 
+from typing import Optional
+
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 from src.artifacts.common.cdm_extractor import CDMExtractor
+from src.artifacts.common.gap_extractor import GapExtractor
 from src.artifacts.common.styles import ExcelStyles
 
 
@@ -97,10 +100,18 @@ def _compose_header(label: str, note: str) -> str:
 # DATA DICTIONARY LAB
 # =============================================================================
 
-def create_data_dictionary_lab_tab(wb: Workbook, extractor: CDMExtractor) -> None:
+def create_data_dictionary_lab_tab(
+    wb: Workbook,
+    extractor: CDMExtractor,
+    gap_extractor: Optional[GapExtractor] = None,
+) -> None:
     """
     Create the Data Dictionary Lab tab — identical to Data Dictionary with
     GREEN workshop columns inserted immediately after Business Definition.
+
+    When ``gap_extractor`` is provided, an ORANGE "Needs Review" column is
+    appended immediately after the final GREEN column ("Finalized") and
+    is set to "Y" for any CDM attribute that appears on Requires_Review.
     """
 
     ws = wb.create_sheet("Data_Dictionary_Lab")
@@ -115,8 +126,16 @@ def create_data_dictionary_lab_tab(wb: Workbook, extractor: CDMExtractor) -> Non
         if key.startswith("ancillary") and a.source_lineage[key]
     })
 
-    # Headers — Entity, Attribute, Business Definition, GREEN lab cols, then
-    # remaining Data Dictionary columns.
+    # Build the set of (entity, attribute) pairs that have any SME-review
+    # mappings flagged in the gap analysis.
+    review_pairs: set = set()
+    if gap_extractor is not None:
+        for f in gap_extractor.get_requires_review_fields():
+            if f.cdm_entity and f.cdm_attribute:
+                review_pairs.add((f.cdm_entity, f.cdm_attribute))
+
+    # Headers — Entity, Attribute, Business Definition, GREEN lab cols,
+    # then an optional ORANGE "Needs Review" flag, then remaining DD cols.
     tail_headers = [
         "Data Type", "Size", "Nullable", "Is PK", "Is FK", "FK Reference",
         "Classification", "PII", "PHI", "Rematch",
@@ -130,17 +149,22 @@ def create_data_dictionary_lab_tab(wb: Workbook, extractor: CDMExtractor) -> Non
     header_specs = (
         [("Entity", None), ("Attribute", None), ("Business Definition", None)]
         + [(_compose_header(l, n), "green") for l, n in DD_GREEN_COLUMNS]
-        + [(h, None) for h in tail_headers]
     )
+    if gap_extractor is not None:
+        header_specs.append(("Needs Review", "orange"))
+    header_specs += [(h, None) for h in tail_headers]
 
     for col_idx, (header, color) in enumerate(header_specs, 1):
         cell = ws.cell(row=1, column=col_idx, value=header)
         if color == "green":
             _apply_lab_header(cell, GREEN_FILL)
+        elif color == "orange":
+            _apply_lab_header(cell, ORANGE_FILL)
         else:
             ExcelStyles.apply_header_style(cell)
 
     num_green = len(DD_GREEN_COLUMNS)
+    has_review_col = gap_extractor is not None
 
     for row_idx, attr in enumerate(attributes, 2):
         is_alt = row_idx % 2 == 0
@@ -187,14 +211,23 @@ def create_data_dictionary_lab_tab(wb: Workbook, extractor: CDMExtractor) -> Non
                         refs.append(src_attr)
             tail_data.append("; ".join(refs))
 
+        needs_review_val = []
+        if has_review_col:
+            needs_review_val = [
+                "Y" if (attr.entity_name, attr.attribute_name) in review_pairs else ""
+            ]
+
         row_data = (
             [attr.entity_name, attr.attribute_name, attr.description or ""]
             + [""] * num_green
+            + needs_review_val
             + tail_data
         )
 
-        # Column index where the Rematch cell lives in this tab
-        rematch_col = 3 + num_green + 10
+        # Column index where the Rematch cell lives in this tab. "Rematch"
+        # is the 10th entry in tail_data, and tail_data starts right after
+        # the Needs-Review column (when present).
+        rematch_col = 3 + num_green + (1 if has_review_col else 0) + 10
 
         for col_idx, value in enumerate(row_data, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
@@ -212,9 +245,12 @@ def create_data_dictionary_lab_tab(wb: Workbook, extractor: CDMExtractor) -> Non
     widths = {"A": 25, "B": 30, "C": 50}
     for i in range(num_green):
         widths[get_column_letter(4 + i)] = 22
+    tail_start = 4 + num_green
+    if has_review_col:
+        widths[get_column_letter(tail_start)] = 14   # "Needs Review"
+        tail_start += 1
 
     tail_widths_fixed = [15, 10, 10, 8, 8, 35, 15, 8, 8, 10]
-    tail_start = 4 + num_green
     for i, w in enumerate(tail_widths_fixed):
         widths[get_column_letter(tail_start + i)] = w
     next_col = tail_start + len(tail_widths_fixed)

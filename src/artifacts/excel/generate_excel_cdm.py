@@ -99,7 +99,7 @@ def generate_excel_cdm(
 
     # 3b. Data Dictionary Lab - workshop columns for attribute-level review
     print(f"      - Data_Dictionary_Lab")
-    create_data_dictionary_lab_tab(wb, extractor)
+    create_data_dictionary_lab_tab(wb, extractor, gap_extractor)
 
     # 3c. Mapping — Collibra source-to-target mapping, placed
     # immediately after Data_Dictionary_Lab so attribute-level tabs
