@@ -31,7 +31,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from src.artifacts.common.cdm_extractor import CDMExtractor
-from src.artifacts.common.schema_resolver import SchemaResolver
+from src.artifacts.common.schema_resolver import SchemaResolver, ancillary_attribute_index
 from src.artifacts.common.styles import ExcelStyles
 from src.config.config_parser import AppConfig
 
@@ -111,19 +111,73 @@ def _derive_types(sql_type: str) -> Tuple[str, str]:
 # ROW ASSEMBLY
 # =============================================================================
 
-def _lineage_entries(attr, source_key: str) -> List[Dict[str, Any]]:
-    """Normalised list of (source_entity, source_attribute) dicts for a source."""
+def _lineage_entries(
+    attr,
+    source_key: str,
+    ancillary_index: Optional[Dict[Tuple[str, str], List[Dict[str, str]]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Normalised list of source-mapping entries for a CDM attribute under
+    one source key.  Each returned dict carries:
+        - table  : source table name to render in the Mapping row
+        - column : source column name to render
+        - schema : resolved schema (empty string defers to SchemaResolver)
+        - rationalized_entity / rationalized_attribute : original
+          source_lineage entry values, kept so callers can still report
+          which lineage row produced the mapping if needed
+
+    For ancillary sources, an attribute index (from rationalized JSON's
+    per-attribute ``source_attribute`` list) is consulted to recover the
+    original ``schema.table.column`` references — the rationalizer
+    renames entities to business-friendly names but keeps original
+    refs stashed elsewhere; this routine reads those.
+
+    For all other sources (EDW, FHIR, NCPDP, ...), behaviour is
+    unchanged: the lineage's ``source_entity`` / ``source_attribute``
+    are used directly and the schema is left empty for SchemaResolver
+    to fill via the per-source schema lookup.
+    """
     entries = attr.source_lineage.get(source_key, []) or []
     if isinstance(entries, dict):
         entries = [entries]
-    out = []
+
+    use_index = (
+        ancillary_index is not None
+        and source_key.startswith("ancillary")
+    )
+
+    out: List[Dict[str, Any]] = []
     for e in entries:
         if not isinstance(e, dict):
             continue
-        tbl = e.get("source_entity", "") or ""
-        col = e.get("source_attribute", "") or ""
-        if tbl or col:
-            out.append({"table": tbl, "column": col})
+        rationalized_ent = e.get("source_entity", "") or ""
+        rationalized_attr = e.get("source_attribute", "") or ""
+
+        if use_index:
+            originals = ancillary_index.get(
+                (rationalized_ent.lower(), rationalized_attr.lower()),
+                [],
+            )
+            if originals:
+                for o in originals:
+                    out.append({
+                        "table":  o.get("table", "")  or rationalized_ent,
+                        "column": o.get("column", "") or rationalized_attr,
+                        "schema": o.get("schema", ""),
+                        "rationalized_entity":    rationalized_ent,
+                        "rationalized_attribute": rationalized_attr,
+                    })
+                continue
+
+        # Default / fallback: use rationalized values directly, no schema
+        if rationalized_ent or rationalized_attr:
+            out.append({
+                "table":  rationalized_ent,
+                "column": rationalized_attr,
+                "schema": "",
+                "rationalized_entity":    rationalized_ent,
+                "rationalized_attribute": rationalized_attr,
+            })
     return out
 
 
@@ -134,6 +188,7 @@ def _build_rows_for_attribute(
     cdm_name: str,
     source_application: str,
     schema_resolver: SchemaResolver,
+    ancillary_indices: Optional[Dict[str, Dict[Tuple[str, str], List[Dict[str, str]]]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Produce one or more row dicts for a single CDM attribute, honouring the
@@ -163,25 +218,35 @@ def _build_rows_for_attribute(
     phi = "Y" if attr.is_phi else "N"
     cde = "Y" if (attr.entity_name, attr.attribute_name) in cde_lookup else "N"
 
-    # key = (source_table, source_column) → {"sources": set of source_keys}
+    # key = (source_table, source_column) → {"sources": set of source_keys, "schema": str}
     merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    indices = ancillary_indices or {}
     for src_key in mapping_sources:
-        for entry in _lineage_entries(attr, src_key):
+        idx = indices.get(src_key)
+        for entry in _lineage_entries(attr, src_key, ancillary_index=idx):
             key = (entry["table"], entry["column"])
-            bucket = merged.setdefault(key, {"table": entry["table"], "column": entry["column"], "sources": set()})
+            bucket = merged.setdefault(key, {
+                "table":  entry["table"],
+                "column": entry["column"],
+                "schema": entry.get("schema", "") or "",
+                "sources": set(),
+            })
             bucket["sources"].add(src_key)
+            # First non-empty schema wins; subsequent identical hits are fine
+            if not bucket["schema"] and entry.get("schema"):
+                bucket["schema"] = entry["schema"]
 
     def _blank_source_flags():
         return {f"map:{s}": "N" for s in mapping_sources}
 
     rows: List[Dict[str, Any]] = []
 
-    def _row(src_table: str, src_column: str, contributing: Iterable[str]) -> Dict[str, Any]:
+    def _row(src_table: str, src_column: str, contributing: Iterable[str], schema_hint: str = "") -> Dict[str, Any]:
         contrib = list(contributing)
-        # Schema is resolved per row: try each contributing source until one
-        # has a hit for this entity; fall back to the resolver's default.
-        resolved_schema = ""
-        if src_table:
+        # Schema precedence: explicit per-row hint (from ancillary index)
+        # → SchemaResolver.resolve per source → resolver fallback.
+        resolved_schema = (schema_hint or "").strip()
+        if not resolved_schema and src_table:
             for src_key in contrib:
                 resolved_schema = schema_resolver.resolve(src_key, src_table)
                 if resolved_schema:
@@ -222,7 +287,10 @@ def _build_rows_for_attribute(
         rows.append(_row("", "", []))
     else:
         for (tbl, col), bucket in merged.items():
-            rows.append(_row(tbl, col, bucket["sources"]))
+            rows.append(_row(
+                tbl, col, bucket["sources"],
+                schema_hint=bucket.get("schema", ""),
+            ))
 
     return rows
 
@@ -297,6 +365,20 @@ def create_mapping_tab(
         ws.freeze_panes = "A2"
         return
 
+    # Build per-ancillary attribute indices: maps (rationalized_entity,
+    # rationalized_attribute) -> list of {schema, table, column} tuples
+    # parsed from the rationalized JSON's source_attribute list.  Used
+    # below to expand each ancillary lineage entry into rows that show
+    # the original source schema/table/column instead of the rationalized
+    # business-friendly entity name.
+    ancillary_indices: Dict[str, Dict[Tuple[str, str], List[Dict[str, str]]]] = {}
+    for src_key in mapping_sources:
+        if src_key.startswith("ancillary"):
+            idx = ancillary_attribute_index(outdir, cdm_name, src_key)
+            ancillary_indices[src_key] = idx
+            if idx:
+                print(f"      Ancillary attr-index: {src_key} -> {len(idx)} (entity, attr) pairs")
+
     # Generate rows, sorted by (entity, attribute) so groups stay contiguous
     attributes = sorted(
         extractor.get_all_attributes(),
@@ -312,6 +394,7 @@ def create_mapping_tab(
             cdm_name=cdm_name,
             source_application=source_application,
             schema_resolver=schema_resolver,
+            ancillary_indices=ancillary_indices,
         ))
 
     # Diagnostic: report which sources contributed schemas

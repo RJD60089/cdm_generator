@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from src.config.config_parser import AppConfig
 from src.config import config_utils
@@ -152,6 +152,106 @@ def ancillary_schemas_from_ddl(
     if not text:
         return {}
     return extract_ddl_schemas(text)
+
+
+# ---------------------------------------------------------------------------
+# Ancillary attribute index — preserves original schema.table.column refs
+# ---------------------------------------------------------------------------
+
+def _parse_source_ref(s: str) -> Optional[Dict[str, str]]:
+    """
+    Parse a rationalized source-ref string into its parts.
+
+    Expected formats (with or without the file prefix):
+      "<file>::<schema>.<table>::<column>"
+      "<file>::<table>::<column>"
+      "<file>::<schema>.<table>"
+      "<schema>.<table>.<column>"
+      "<schema>.<table>"
+
+    Returns dict with 'schema'/'table'/'column' (any may be empty), or
+    None if the string can't be split sensibly.
+    """
+    if not s or not isinstance(s, str):
+        return None
+    s = s.strip()
+    parts = s.split("::")
+    column = ""
+    schema_table = ""
+    if len(parts) >= 3:
+        schema_table = parts[1]
+        column = parts[2]
+    elif len(parts) == 2:
+        # could be "<file>::<schema>.<table>" or "<file>::<table>"
+        schema_table = parts[1]
+    else:
+        # No "::" — assume "<schema>.<table>(.<column>)"
+        schema_table = s
+    schema = ""
+    table = ""
+    if "." in schema_table:
+        schema, table = schema_table.split(".", 1)
+        # If table itself contains a dot, the last segment may be a column
+        if "." in table and not column:
+            table, column = table.rsplit(".", 1)
+    else:
+        table = schema_table
+    return {
+        "schema": schema.strip(),
+        "table":  table.strip(),
+        "column": column.strip(),
+    }
+
+
+def ancillary_attribute_index(
+    outdir: Path,
+    domain: str,
+    source_id: str,
+) -> Dict[Tuple[str, str], List[Dict[str, str]]]:
+    """
+    Build a {(rationalized_entity_lower, rationalized_attr_lower):
+              [{schema, table, column}, ...]} lookup for one ancillary
+    source by parsing its rationalized JSON's per-attribute
+    ``source_attribute`` list.
+
+    This recovers the original schema.table.column references the
+    rationalizer captures for each attribute even after it renames
+    entities to business-friendly names.
+    """
+    rat_dir = outdir / "rationalized"
+    if not rat_dir.exists():
+        return {}
+    domain_safe = domain.lower().replace(" ", "_")
+    matches = sorted(
+        rat_dir.glob(f"rationalized_{source_id}_{domain_safe}_*.json"),
+        reverse=True,
+    )
+    if not matches:
+        return {}
+    try:
+        data = json.loads(matches[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    # Tuple type alias hidden to avoid runtime cost
+    out: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+    for entity in data.get("entities", []):
+        ent = (entity.get("entity_name") or "").strip().lower()
+        for attr in entity.get("attributes", []) or []:
+            aname = (attr.get("attribute_name") or "").strip().lower()
+            if not ent or not aname:
+                continue
+            raw_refs = attr.get("source_attribute") or []
+            if isinstance(raw_refs, str):
+                raw_refs = [raw_refs]
+            entries: List[Dict[str, str]] = []
+            for ref in raw_refs:
+                parsed = _parse_source_ref(ref)
+                if parsed and (parsed["table"] or parsed["column"]):
+                    entries.append(parsed)
+            if entries:
+                out[(ent, aname)] = entries
+    return out
 
 
 # ---------------------------------------------------------------------------
