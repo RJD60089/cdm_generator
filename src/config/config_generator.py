@@ -19,6 +19,7 @@ Usage:
     python -m src.config.config_generator plan
     python -m src.config.config_generator formulary
 """
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Dict, List, Optional
 
 from . import config_utils
 from .config_gen_core import ConfigGeneratorBase, prompt_user_choice
+from .config_gen_mapping import run_mapping_config
 from .config_gen_fhir import FHIRConfigGenerator
 from .config_gen_ncpdp import NCPDPConfigGenerator
 from .config_gen_glue import GlueConfigGenerator
@@ -75,50 +77,81 @@ class ConfigGenerator(ConfigGeneratorBase):
         print(f"   Domain: {source_config['cdm']['domain']}")
         print(f"   Type: {source_config['cdm']['type']}")
         
-        # Step 2: Auto-discover guardrails and DDL files
+        # Step 2: Auto-discover guardrails, DDL, and ancillary files.
+        # All three are pure filesystem scans — no AI calls — so they
+        # always run, even when the user opts into the "skip AI" path.
         guardrails_files = config_utils.list_guardrail_files(self.cdm_name)
         ddl_files = config_utils.list_ddl_files(self.cdm_name)
-        
+        new_ancillaries = self._auto_discover_new_ancillaries(source_config)
+
         print(f"\n   Auto-discovered files:")
         print(f"      Guardrails: {len(guardrails_files)}")
         print(f"      DDL: {len(ddl_files)}")
+        existing_anc = (source_config.get("input_files") or {}).get("ancillary") or []
+        if new_ancillaries:
+            print(f"      Ancillary: {len(existing_anc)} existing + {len(new_ancillaries)} new file(s)")
+            for a in new_ancillaries:
+                print(f"         + {a['file']}  (source_id={a['source_id']}, type={a['file_type']})")
+        else:
+            print(f"      Ancillary: {len(existing_anc)} existing, 0 new files")
         
         # Step 3: Run analyses based on user selections
         fhir_result = None
         ncpdp_result = None
         glue_result = None
-        
-        # FHIR Analysis
-        if prompt_user_choice("\n   Run FHIR analysis?", default="Y"):
-            fhir_result = self.fhir_gen.run_analysis(source_config, dry_run)
-            if not dry_run and fhir_result:
-                fhir_result, corrections = self.fhir_gen.validate_and_correct_files(fhir_result)
-        
-        # NCPDP Analysis
-        if prompt_user_choice("\n   Run NCPDP analysis?", default="Y"):
-            ncpdp_result = self.ncpdp_gen.run_analysis(source_config, dry_run)
-            if not dry_run and ncpdp_result:
-                ncpdp_result = self.ncpdp_gen.validate_codes(ncpdp_result)
-        
-        # Glue Analysis
-        if prompt_user_choice("\n   Run Glue analysis?", default="Y"):
-            glue_result = self.glue_gen.run_analysis(source_config, dry_run)
-            # Note: Glue generator prints its own skip messages
-        
-        # EDW Analysis
         edw_result = None
-        if prompt_user_choice("\n   Run EDW entity selection?", default="Y"):
-            edw_result = self.edw_gen.run_analysis(source_config, dry_run)
-
-        # Ancillary Analysis
         ancillary_result = None
-        if prompt_user_choice("\n   Configure ancillary definition sources?", default="Y"):
-            ancillary_result = self.ancillary_gen.run_analysis(source_config, dry_run)
+
+        # Shortcut: skip every AI selector and only refresh the mapping block
+        skip_ai = prompt_user_choice(
+            "\n   Skip AI selectors (FHIR/NCPDP/Glue/EDW/Ancillary) and only refresh mapping block?",
+            default="N",
+        )
+
+        if not skip_ai:
+            # FHIR Analysis
+            if prompt_user_choice("\n   Run FHIR analysis?", default="Y"):
+                fhir_result = self.fhir_gen.run_analysis(source_config, dry_run)
+                if not dry_run and fhir_result:
+                    fhir_result, corrections = self.fhir_gen.validate_and_correct_files(fhir_result)
+
+            # NCPDP Analysis
+            if prompt_user_choice("\n   Run NCPDP analysis?", default="Y"):
+                ncpdp_result = self.ncpdp_gen.run_analysis(source_config, dry_run)
+                if not dry_run and ncpdp_result:
+                    ncpdp_result = self.ncpdp_gen.validate_codes(ncpdp_result)
+
+            # Glue Analysis
+            if prompt_user_choice("\n   Run Glue analysis?", default="Y"):
+                glue_result = self.glue_gen.run_analysis(source_config, dry_run)
+
+            # EDW Analysis
+            if prompt_user_choice("\n   Run EDW entity selection?", default="Y"):
+                edw_result = self.edw_gen.run_analysis(source_config, dry_run)
+
+            # Ancillary Analysis
+            if prompt_user_choice("\n   Configure ancillary definition sources?", default="Y"):
+                ancillary_result = self.ancillary_gen.run_analysis(source_config, dry_run)
+
+        # Mapping block — runs on a snapshot that already reflects any
+        # ancillary updates we just made (AI or filesystem-only), so DDL
+        # ancillary entries added this run are eligible for the mapping
+        # prompt.
+        mapping_result = None
+        preview_config = self._merge_updates(
+            source_config, fhir_result, ncpdp_result, glue_result,
+            guardrails_files, ddl_files, edw_result, ancillary_result,
+            new_ancillaries=new_ancillaries,
+        )
+        if prompt_user_choice("\n   Configure mapping block (Collibra)?", default="Y"):
+            mapping_result = run_mapping_config(preview_config)
 
         # Step 4: Build updated config (merge changes into source)
         updated_config = self._merge_updates(
             source_config, fhir_result, ncpdp_result, glue_result,
-            guardrails_files, ddl_files, edw_result, ancillary_result
+            guardrails_files, ddl_files, edw_result, ancillary_result,
+            mapping_result=mapping_result,
+            new_ancillaries=new_ancillaries,
         )
         
         # Step 5: Save with new timestamp
@@ -168,6 +201,50 @@ class ConfigGenerator(ConfigGeneratorBase):
         print(f"\n      Create a base config file before running config generator.")
         return None
     
+    def _auto_discover_new_ancillaries(self, source_config: Dict) -> List[Dict]:
+        """Filesystem-only ancillary discovery — no AI calls.
+
+        Returns minimal new-entry dicts for ancillary source files that
+        exist on disk but are not yet referenced in
+        ``input_files.ancillary``. Each new entry carries:
+            file, file_type (from extension), processing_mode="refiner",
+            source_id (slugified filename without extension)
+
+        Existing ancillary entries are NEVER modified by this method;
+        the caller appends the returned list to whatever's already there
+        so AI-enriched fields (description, etc.) survive.
+        """
+        existing = (source_config.get("input_files") or {}).get("ancillary") or []
+        existing_files = {(e.get("file") or "").lower() for e in existing}
+
+        new_entries: List[Dict] = []
+        for filename in config_utils.list_ancillary_files(self.cdm_name):
+            if filename.lower() in existing_files:
+                continue
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            file_type = {
+                "sql":  "ddl",
+                "ddl":  "ddl",
+                "json": "json",
+                "yaml": "yaml",
+                "yml":  "yaml",
+                "csv":  "csv",
+                "xlsx": "spreadsheet",
+                "txt":  "text",
+            }.get(ext, ext or "unknown")
+
+            stem = filename.rsplit(".", 1)[0]
+            slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+            source_id = f"ancillary-{slug}" if slug else f"ancillary-{stem.lower()}"
+
+            new_entries.append({
+                "file":            filename,
+                "file_type":       file_type,
+                "processing_mode": "refiner",
+                "source_id":       source_id,
+            })
+        return new_entries
+
     def _merge_updates(
         self,
         source_config: Dict,
@@ -177,7 +254,9 @@ class ConfigGenerator(ConfigGeneratorBase):
         guardrails_files: List[str],
         ddl_files: List[str],
         edw_result: Optional[Dict] = None,
-        ancillary_result: Optional[Dict] = None
+        ancillary_result: Optional[Dict] = None,
+        mapping_result: Optional[Dict] = None,
+        new_ancillaries: Optional[List[Dict]] = None,
     ) -> Dict:
         """Merge analysis results into source config.
         
@@ -244,6 +323,22 @@ class ConfigGenerator(ConfigGeneratorBase):
         # Update Ancillary if analyzed
         if ancillary_result and 'ancillary' in ancillary_result:
             config['input_files']['ancillary'] = ancillary_result['ancillary']
+
+        # Append filesystem-only newly-discovered ancillaries (no AI).
+        # Skip anything already present so we don't clobber AI-enriched
+        # entries from a previous run.
+        if new_ancillaries:
+            current = config['input_files'].get('ancillary') or []
+            seen_files = {(e.get('file') or '').lower() for e in current}
+            for entry in new_ancillaries:
+                if (entry.get('file') or '').lower() not in seen_files:
+                    current.append(entry)
+                    seen_files.add((entry.get('file') or '').lower())
+            config['input_files']['ancillary'] = current
+
+        # Mapping block — replace wholesale when the user reconfigured it
+        if mapping_result is not None:
+            config['mapping'] = mapping_result
 
         # Ensure output section is populated
         if 'output' not in config:
