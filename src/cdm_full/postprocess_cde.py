@@ -101,7 +101,10 @@ identifiers with real-world exposure risk, like SSN or DEA number)
 When evaluating, consider source coverage (in source_lineage):
 - Fields emphasized in Guardrails are likely business-critical, but \
 business-critical does not automatically mean CDE
-- Fields in Glue represent current system reality
+- Fields in Ancillary files identified as DDL should be considered and are \
+the best representative of current system reality
+- Fields emphasized in Ancillary files should be considered
+- Fields in Glue represent are a secondary view ofcurrent system reality
 - Fields appearing across multiple sources may warrant closer scrutiny
 
 === PBM-SPECIFIC CONTEXT ===
