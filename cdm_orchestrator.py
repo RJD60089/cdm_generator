@@ -503,28 +503,42 @@ Examples:
                     match_status = "✓ match file exists" if st in existing_matches else "○ no match file"
                     print(f"     • {st}: {discovered[st].name} [{match_status}]")
                 
-                # Prompt: Skip mapping?
+                # Prompt: mapping mode
+                #   reuse — use ALL existing match files; no per-source prompts
+                #   select — pick per source (default; sources WITH existing match
+                #            files default to N, sources WITHOUT default to Y)
+                #   remap  — force re-run AI on EVERY source (ignore existing
+                #            match files)
                 skip_mapping = False
+                remap_all = False
                 if existing_matches:
-                    skip_mapping = prompt_user(
-                        f"\nSkip mapping and use existing match files ({len(existing_matches)} available)?",
-                        default="N"
-                    )
-                
-                # Prompt: Per-source mapping (if not skipping)
+                    print(f"\n   Mapping mode:")
+                    print(f"     [s] Select per source (default)")
+                    print(f"     [r] Reuse all existing match files (no AI mapping)")
+                    print(f"     [a] Remap ALL sources (re-run AI on every source)")
+                    raw = input(f"   Choose [s/r/a, default s]: ").strip().lower() or "s"
+                    if raw in ("r", "reuse", "skip"):
+                        skip_mapping = True
+                    elif raw in ("a", "all", "remap"):
+                        remap_all = True
+
+                # Prompt: Per-source mapping (when in select or remap-all mode)
                 sources_to_map = []
-                if not skip_mapping and not dry_run:
-                    print(f"\n   Select sources to map:")
+                if skip_mapping and not dry_run:
+                    print(f"   Reusing existing match files for all sources, skipping AI mapping")
+                elif remap_all and not dry_run:
+                    sources_to_map = list(source_types)
+                    print(f"   Remapping ALL {len(sources_to_map)} sources (existing match files will be replaced)")
+                elif not dry_run:
+                    print(f"\n   Select sources to map (sources with existing matches default to N):")
                     for st in source_types:
                         existing_note = f" [existing: {existing_matches[st].name}]" if st in existing_matches else ""
                         default = "N" if st in existing_matches else "Y"
                         if prompt_user(f"   Map {st}?{existing_note}", default=default):
                             sources_to_map.append(st)
-                    
+
                     if not sources_to_map and not existing_matches:
                         print(f"   ⚠️  No sources selected and no existing match files")
-                elif not dry_run:
-                    print(f"   Using existing match files, skipping AI mapping")
                 
                 # Prompt: Generate full CDM?
                 generate_cdm = prompt_user("\nGenerate Full CDM?", default="Y")
