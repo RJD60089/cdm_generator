@@ -127,9 +127,13 @@ def create_data_dictionary_tab(
             ]
         for anc_src in ancillary_sources:
             entries = attr.source_lineage.get(anc_src, [])
+            # Schema is omitted on this tab — it's clutter when columns
+            # are already labelled per ancillary source. Mapping tab
+            # keeps schema for Collibra ingestion.
             refs = format_ancillary_source_refs(
                 ancillary_indices.get(anc_src),
                 entries,
+                include_schema=False,
             )
             row_data.append("; ".join(refs))
 

@@ -227,9 +227,12 @@ def create_data_dictionary_lab_tab(
             ]
         for anc_src in ancillary_sources:
             entries = attr.source_lineage.get(anc_src, [])
+            # Schema dropped here for the same reason as the main DD tab —
+            # column header already names the source.
             refs = format_ancillary_source_refs(
                 ancillary_indices.get(anc_src),
                 entries,
+                include_schema=False,
             )
             tail_data.append("; ".join(refs))
 

@@ -310,12 +310,19 @@ class SchemaResolver:
 def format_ancillary_source_refs(
     ancillary_index: Optional[Dict[Tuple[str, str], List[Dict[str, str]]]],
     lineage_entries,
+    include_schema: bool = True,
 ) -> List[str]:
     """
     Render an ancillary source's lineage entries as a list of
-    "schema.table.column" strings (or just "table.column" if no
-    schema), using the per-attribute index to recover original
-    source references when the rationalizer renamed entities.
+    formatted source-reference strings, using the per-attribute index
+    to recover original source references when the rationalizer
+    renamed entities.
+
+    With ``include_schema=True`` (default) the format is
+    ``schema.table.column`` (or ``table.column`` when schema is empty).
+    With ``include_schema=False`` the schema is dropped — useful on
+    tabs where schema is just clutter (Data Dictionary, Cross-Reference)
+    while the Mapping tab keeps schema for Collibra ingestion.
 
     When the index is empty or has no match for a given
     (rationalized_entity, rationalized_attribute), falls back to the
@@ -327,6 +334,8 @@ def format_ancillary_source_refs(
             specific source — or None to force pure-fallback behaviour.
         lineage_entries: the raw list of source_lineage entries for one
             ancillary source on one CDM attribute.
+        include_schema: if False, drop the schema prefix from the
+            rendered string.
 
     Returns: ordered list of formatted strings (deduped while preserving
     first-seen order).
@@ -361,7 +370,8 @@ def format_ancillary_source_refs(
                 schema = (o.get("schema") or "").strip()
                 table  = (o.get("table") or "").strip()
                 column = (o.get("column") or "").strip()
-                if schema and table and column:
+                use_schema = include_schema and schema
+                if use_schema and table and column:
                     _add(f"{schema}.{table}.{column}")
                 elif table and column:
                     _add(f"{table}.{column}")

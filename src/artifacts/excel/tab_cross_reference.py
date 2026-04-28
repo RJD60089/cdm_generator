@@ -166,10 +166,13 @@ def create_cross_reference_tab(
         source_cells: List[str] = []
         for s in source_types:
             if s.startswith("ancillary"):
-                # Use the ancillary attr-index to render real schema.table.column
+                # Use the ancillary attr-index to render real table.column;
+                # schema is dropped here because the column header already
+                # identifies the ancillary source.
                 refs = format_ancillary_source_refs(
                     ancillary_indices.get(s),
                     lineage.get(s, []),
+                    include_schema=False,
                 )
                 source_cells.append("; ".join(refs))
             else:
