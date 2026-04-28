@@ -301,3 +301,77 @@ class SchemaResolver:
     def stats(self) -> Dict[str, int]:
         """How many entries each source contributed to its lookup."""
         return {src: len(m) for src, m in self._maps.items()}
+
+
+# ---------------------------------------------------------------------------
+# Public helpers for tab generators
+# ---------------------------------------------------------------------------
+
+def format_ancillary_source_refs(
+    ancillary_index: Optional[Dict[Tuple[str, str], List[Dict[str, str]]]],
+    lineage_entries,
+) -> List[str]:
+    """
+    Render an ancillary source's lineage entries as a list of
+    "schema.table.column" strings (or just "table.column" if no
+    schema), using the per-attribute index to recover original
+    source references when the rationalizer renamed entities.
+
+    When the index is empty or has no match for a given
+    (rationalized_entity, rationalized_attribute), falls back to the
+    rationalized "<source_entity>.<source_attribute>" rendering so
+    tabs degrade gracefully on older runs without an attr-index.
+
+    Args:
+        ancillary_index: result of ancillary_attribute_index() for this
+            specific source — or None to force pure-fallback behaviour.
+        lineage_entries: the raw list of source_lineage entries for one
+            ancillary source on one CDM attribute.
+
+    Returns: ordered list of formatted strings (deduped while preserving
+    first-seen order).
+    """
+    if not isinstance(lineage_entries, list):
+        if isinstance(lineage_entries, dict):
+            lineage_entries = [lineage_entries]
+        else:
+            return []
+
+    out: List[str] = []
+    seen: set = set()
+
+    def _add(s: str) -> None:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    for e in lineage_entries:
+        if not isinstance(e, dict):
+            continue
+        rent = (e.get("source_entity") or "").strip()
+        rattr = (e.get("source_attribute") or "").strip()
+
+        # Try the index first
+        hit_originals = []
+        if ancillary_index is not None:
+            hit_originals = ancillary_index.get((rent.lower(), rattr.lower()), [])
+
+        if hit_originals:
+            for o in hit_originals:
+                schema = (o.get("schema") or "").strip()
+                table  = (o.get("table") or "").strip()
+                column = (o.get("column") or "").strip()
+                if schema and table and column:
+                    _add(f"{schema}.{table}.{column}")
+                elif table and column:
+                    _add(f"{table}.{column}")
+                elif column:
+                    _add(column)
+        else:
+            # Fallback: the rationalized form
+            if rent and rattr:
+                _add(f"{rent}.{rattr}")
+            elif rattr:
+                _add(rattr)
+
+    return out

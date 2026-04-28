@@ -9,13 +9,19 @@ Source columns are built dynamically from whatever sources are present in
 the Full CDM, so adding EDW (or any future source) requires no code changes.
 """
 
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from typing import List, Dict, Any
 
 from src.artifacts.common.cdm_extractor import CDMExtractor
+from src.artifacts.common.schema_resolver import (
+    ancillary_attribute_index,
+    format_ancillary_source_refs,
+)
 
 
 # Styles
@@ -102,7 +108,12 @@ def _discover_source_types(extractor: CDMExtractor) -> List[str]:
     return ordered + extras
 
 
-def create_cross_reference_tab(wb: Workbook, extractor: CDMExtractor) -> Worksheet:
+def create_cross_reference_tab(
+    wb: Workbook,
+    extractor: CDMExtractor,
+    outdir: Optional[Path] = None,
+    cdm_name: str = "",
+) -> Worksheet:
     """
     Create Cross-Reference tab showing attribute-to-source mappings.
 
@@ -121,6 +132,16 @@ def create_cross_reference_tab(wb: Workbook, extractor: CDMExtractor) -> Workshe
     if not source_types:
         # Fallback: use the known list so the tab isn't empty
         source_types = [s for s in _SOURCE_ORDER]
+
+    # Per-ancillary attribute indices — only ancillary sources need this
+    # remapping (their entities get renamed by the rationalizer).  EDW /
+    # FHIR / NCPDP / Glue / Guardrails already store actual source-side
+    # names in source_entity, so they're unchanged.
+    ancillary_indices = {}
+    if outdir is not None and cdm_name:
+        for s in source_types:
+            if s.startswith("ancillary"):
+                ancillary_indices[s] = ancillary_attribute_index(outdir, cdm_name, s)
 
     # Build header list
     fixed_headers = ["Entity", "Attribute", "Data Type"]
@@ -142,11 +163,23 @@ def create_cross_reference_tab(wb: Workbook, extractor: CDMExtractor) -> Workshe
     for attr in attributes:
         lineage = attr.source_lineage or {}
 
+        source_cells: List[str] = []
+        for s in source_types:
+            if s.startswith("ancillary"):
+                # Use the ancillary attr-index to render real schema.table.column
+                refs = format_ancillary_source_refs(
+                    ancillary_indices.get(s),
+                    lineage.get(s, []),
+                )
+                source_cells.append("; ".join(refs))
+            else:
+                source_cells.append(_extract_source_field(lineage, s))
+
         data = [
             attr.entity_name,
             attr.attribute_name,
             attr.data_type,
-        ] + [_extract_source_field(lineage, s) for s in source_types]
+        ] + source_cells
 
         for col, value in enumerate(data, 1):
             cell = ws.cell(row=row, column=col, value=value)

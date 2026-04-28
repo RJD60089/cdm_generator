@@ -293,7 +293,9 @@ def _update_excel_data_dictionary(
             tmp_path = Path(tmp.name)
 
         extractor = CDMExtractor(cdm_path=tmp_path)
-        create_data_dictionary_tab(wb, extractor)
+        # outdir + cdm_name let the tab look up rationalized JSON to render
+        # original schema.table.column refs in ancillary columns.
+        create_data_dictionary_tab(wb, extractor, outdir=outdir, cdm_name=domain)
         tmp_path.unlink(missing_ok=True)
 
         # Move the new sheet to the original position

@@ -93,13 +93,22 @@ def generate_excel_cdm(
     print(f"      - Entities_Lab")
     create_entities_lab_tab(wb, extractor)
 
+    # cdm_path lives at output/<domain>/full_cdm/cdm_<domain>_full_*.json,
+    # so its parent.parent is the per-domain outdir we hand to tabs that
+    # need to read sibling artifacts (rationalized JSONs etc.).
+    domain_outdir = cdm_path.parent.parent
+    domain_name = config.cdm.domain or ""
+
     # 3. Data Dictionary - primary reference
     print(f"      - Data_Dictionary")
-    create_data_dictionary_tab(wb, extractor)
+    create_data_dictionary_tab(wb, extractor, outdir=domain_outdir, cdm_name=domain_name)
 
     # 3b. Data Dictionary Lab - workshop columns for attribute-level review
     print(f"      - Data_Dictionary_Lab")
-    create_data_dictionary_lab_tab(wb, extractor, gap_extractor)
+    create_data_dictionary_lab_tab(
+        wb, extractor, gap_extractor,
+        outdir=domain_outdir, cdm_name=domain_name,
+    )
 
     # 3c. Mapping — Collibra source-to-target mapping, placed
     # immediately after Data_Dictionary_Lab so attribute-level tabs
@@ -107,7 +116,7 @@ def generate_excel_cdm(
     # Schema-resolver lookups read from outdir/rationalized/ and from the
     # ancillary source files referenced by config — so pass the base outdir.
     print(f"      - Mapping")
-    create_mapping_tab(wb, extractor, config, outdir=cdm_path.parent.parent)
+    create_mapping_tab(wb, extractor, config, outdir=domain_outdir)
 
     # 3d. Candidate CDEs - placed after Mapping so the CDE list sits
     # alongside the attribute-level tabs and can be referenced by the
@@ -121,7 +130,7 @@ def generate_excel_cdm(
 
     # 5. Cross-Reference - source lineage mapping
     print(f"      - Cross_Reference")
-    create_cross_reference_tab(wb, extractor)
+    create_cross_reference_tab(wb, extractor, outdir=domain_outdir, cdm_name=domain_name)
 
     # 7. Business Rules
     print(f"      - Business_Rules")

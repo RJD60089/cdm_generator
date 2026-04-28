@@ -13,6 +13,7 @@ Two worksheets:
     immediately after "Description".
 """
 
+from pathlib import Path
 from typing import Optional
 
 from openpyxl import Workbook
@@ -20,6 +21,10 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 from src.artifacts.common.cdm_extractor import CDMExtractor
 from src.artifacts.common.gap_extractor import GapExtractor
+from src.artifacts.common.schema_resolver import (
+    ancillary_attribute_index,
+    format_ancillary_source_refs,
+)
 from src.artifacts.common.styles import ExcelStyles
 
 
@@ -104,6 +109,8 @@ def create_data_dictionary_lab_tab(
     wb: Workbook,
     extractor: CDMExtractor,
     gap_extractor: Optional[GapExtractor] = None,
+    outdir: Optional[Path] = None,
+    cdm_name: str = "",
 ) -> None:
     """
     Create the Data Dictionary Lab tab — identical to Data Dictionary with
@@ -125,6 +132,14 @@ def create_data_dictionary_lab_tab(
         for key in a.source_lineage
         if key.startswith("ancillary") and a.source_lineage[key]
     })
+
+    # Per-ancillary attribute indices — recover original schema.table.column
+    # from the rationalized JSON's source_attribute list so the Lab tab
+    # ancillary columns show real PG identifiers, not rationalized names.
+    ancillary_indices = {}
+    if outdir is not None and cdm_name:
+        for src in ancillary_sources:
+            ancillary_indices[src] = ancillary_attribute_index(outdir, cdm_name, src)
 
     # Build the set of (entity, attribute) pairs that have any SME-review
     # mappings flagged in the gap analysis.
@@ -212,15 +227,10 @@ def create_data_dictionary_lab_tab(
             ]
         for anc_src in ancillary_sources:
             entries = attr.source_lineage.get(anc_src, [])
-            refs = []
-            if isinstance(entries, list):
-                for e in entries:
-                    src_entity = e.get("source_entity", "")
-                    src_attr = e.get("source_attribute", "")
-                    if src_entity and src_attr:
-                        refs.append(f"{src_entity}.{src_attr}")
-                    elif src_attr:
-                        refs.append(src_attr)
+            refs = format_ancillary_source_refs(
+                ancillary_indices.get(anc_src),
+                entries,
+            )
             tail_data.append("; ".join(refs))
 
         needs_review_val = []

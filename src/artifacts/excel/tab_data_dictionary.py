@@ -1,14 +1,26 @@
 # src/artifacts/excel/tab_data_dictionary.py
 """Generate Data Dictionary tab for Excel CDM."""
 
+from pathlib import Path
+from typing import Optional
+
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter
 from src.artifacts.common.cdm_extractor import CDMExtractor
+from src.artifacts.common.schema_resolver import (
+    ancillary_attribute_index,
+    format_ancillary_source_refs,
+)
 from src.artifacts.common.styles import ExcelStyles
 
 
-def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
+def create_data_dictionary_tab(
+    wb: Workbook,
+    extractor: CDMExtractor,
+    outdir: Optional[Path] = None,
+    cdm_name: str = "",
+) -> None:
     """
     Create the Data Dictionary tab with all attributes.
 
@@ -37,6 +49,15 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
             if key.startswith("ancillary") and a.source_lineage[key]:
                 ancillary_sources.add(key)
     ancillary_sources = sorted(ancillary_sources)
+
+    # Per-ancillary attribute indices — recover original schema.table.column
+    # from rationalized JSON's source_attribute lists (the rationalizer
+    # renames source entities to business-friendly names; this index lets
+    # the tab still display the actual PG identifiers).
+    ancillary_indices = {}
+    if outdir is not None and cdm_name:
+        for src in ancillary_sources:
+            ancillary_indices[src] = ancillary_attribute_index(outdir, cdm_name, src)
 
     # --- Headers ---
     headers = [
@@ -106,19 +127,11 @@ def create_data_dictionary_tab(wb: Workbook, extractor: CDMExtractor) -> None:
             ]
         for anc_src in ancillary_sources:
             entries = attr.source_lineage.get(anc_src, [])
-            if isinstance(entries, list) and entries:
-                refs = []
-                for e in entries:
-                    src_entity = e.get("source_entity", "")
-                    src_attr = e.get("source_attribute", "")
-                    if src_entity and src_attr:
-                        refs.append(f"{src_entity}.{src_attr}")
-                    elif src_attr:
-                        refs.append(src_attr)
-                ref_str = "; ".join(refs)
-            else:
-                ref_str = ""
-            row_data.append(ref_str)
+            refs = format_ancillary_source_refs(
+                ancillary_indices.get(anc_src),
+                entries,
+            )
+            row_data.append("; ".join(refs))
 
         for col, value in enumerate(row_data, 1):
             cell = ws.cell(row=row_idx, column=col, value=value)
