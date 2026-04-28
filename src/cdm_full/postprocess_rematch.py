@@ -49,20 +49,26 @@ MAX_CDM_ATTR_DESC = 120      # Chars to include per CDM attribute description
 DEFAULT_NAME_SIMILARITY_THRESHOLD = 0.55
 DEFAULT_NAME_TIE_MARGIN = 0.05
 
-# Reason categories that the fuzzy name pass is allowed to "rescue".
-# These were previously dispositioned as unmapped by the LLM, but the
-# fuzzy pass may still find a legitimate match via attribute name or
-# field-code identity. Other categories (technical_metadata, cross_domain,
-# excluded_by_design) are structural rejections and stay filtered out.
-_RESCUE_REASON_PREFIXES = ("[no_cdm_equivalent]", "[bare_code_stub]")
+# Reason categories that BLOCK the fuzzy name pass.
+# These three are structural rejections — the field genuinely doesn't
+# belong in the CDM (technical metadata, wrong domain, or explicitly
+# excluded by design). Any other reason — empty, plain prose from Step 5,
+# or [no_cdm_equivalent]/[bare_code_stub] from a prior rematch — is
+# eligible: the fuzzy pass costs nothing, and prior LLM dispositions
+# can be overturned by a literal name/code match the LLM missed.
+_REJECT_REASON_PREFIXES = (
+    "[technical_metadata]",
+    "[cross_domain]",
+    "[excluded_by_design]",
+)
 
 
 def _is_rescue_eligible(field: Dict) -> bool:
-    """Fuzzy-pass candidacy. No reason OR a rescue-eligible reason."""
-    reason = field.get("reason", "") or ""
+    """Fuzzy-pass candidacy. Eligible unless the reason is a structural reject."""
+    reason = (field.get("reason") or "").strip().lower()
     if not reason:
         return True
-    return reason.startswith(_RESCUE_REASON_PREFIXES)
+    return not reason.startswith(_REJECT_REASON_PREFIXES)
 
 
 def _is_llm_eligible(field: Dict) -> bool:
