@@ -1,0 +1,203 @@
+# src/artifacts/common/schema_resolver.py
+"""
+Per-source schema resolution for the Mapping tab.
+
+Resolves the SOURCE schema for every row written to the Mapping tab,
+keyed by (mapping_source, source_entity).  Sources of truth, in order:
+
+  - "edw"  →  rationalized_edw_<domain>_*.json   (entities[*].source_info.source_schema)
+  - "ancillary-*" with a SQL DDL file →  parse `CREATE TABLE <schema>.<table>` patterns
+  - anything else (or extraction failure) →  fall back to config.mapping.source_schema
+
+This keeps users from having to maintain a per-source schema in config.json
+when the schema is already present in the source artifacts.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Dict, Optional
+
+from src.config.config_parser import AppConfig
+from src.config import config_utils
+
+
+# ---------------------------------------------------------------------------
+# SQL DDL schema extractor
+# ---------------------------------------------------------------------------
+
+# Matches CREATE TABLE [schema].[table] in a wide range of SQL dialects:
+#   CREATE TABLE schema.table (
+#   CREATE TABLE [schema].[table] (
+#   CREATE TABLE "schema"."table" (
+#   CREATE TABLE `schema`.`table` (
+#   CREATE TABLE IF NOT EXISTS schema.table (
+# Schema and table identifiers may contain letters, digits, underscores.
+_DDL_CREATE_TABLE_RE = re.compile(
+    r"""
+    \bCREATE \s+ TABLE \s+ (?:IF \s+ NOT \s+ EXISTS \s+)?
+    (?:\[ ([\w]+) \] | " ([\w]+) " | ` ([\w]+) ` | ([\w]+))      # schema (g1-4)
+    \s* \. \s*
+    (?:\[ ([\w]+) \] | " ([\w]+) " | ` ([\w]+) ` | ([\w]+))      # table  (g5-8)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def extract_ddl_schemas(ddl_text: str) -> Dict[str, str]:
+    """
+    Return ``{table_name_lower: schema}`` for every CREATE TABLE
+    statement found in the DDL text.  Tables without a schema prefix
+    are absent from the result (the caller handles fallback).
+    """
+    out: Dict[str, str] = {}
+    for m in _DDL_CREATE_TABLE_RE.finditer(ddl_text):
+        schema = next((g for g in m.groups()[:4] if g), "")
+        table  = next((g for g in m.groups()[4:] if g), "")
+        if schema and table:
+            out[table.lower()] = schema
+    return out
+
+
+def _read_text(path: Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# EDW schema reader
+# ---------------------------------------------------------------------------
+
+def _find_rationalized_edw(outdir: Path, domain: str) -> Optional[Path]:
+    rat_dir = outdir / "rationalized"
+    if not rat_dir.exists():
+        return None
+    domain_safe = domain.lower().replace(" ", "_")
+    matches = sorted(
+        rat_dir.glob(f"rationalized_edw_{domain_safe}_*.json"),
+        reverse=True,
+    )
+    return matches[0] if matches else None
+
+
+def edw_schemas_from_rationalized(outdir: Path, domain: str) -> Dict[str, str]:
+    """
+    Read the most-recent ``rationalized_edw_<domain>_*.json`` and return
+    ``{entity_name_lower: source_schema}`` for every entity that carries
+    a schema.  Empty dict when nothing is available.
+    """
+    path = _find_rationalized_edw(outdir, domain)
+    if not path:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: Dict[str, str] = {}
+    for entity in data.get("entities", []):
+        name = (entity.get("entity_name") or "").strip()
+        if not name:
+            continue
+        info = entity.get("source_info") or {}
+        # Some older runs used "schema", newer ones "source_schema"
+        schema = info.get("source_schema") or info.get("schema") or ""
+        if schema:
+            out[name.lower()] = schema
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Ancillary DDL schema reader
+# ---------------------------------------------------------------------------
+
+def _ancillary_entry_for(config: AppConfig, source_id: str) -> Optional[Dict]:
+    for entry in config.ancillary or []:
+        if entry.get("source_id") == source_id:
+            return entry
+    return None
+
+
+def ancillary_schemas_from_ddl(
+    config: AppConfig,
+    source_id: str,
+) -> Dict[str, str]:
+    """
+    For an ancillary entry whose ``file_type == "ddl"``, locate the raw
+    DDL file under ``input/business/cdm_<name>/ancillary/source/`` and
+    return ``{table_lower: schema}`` from its CREATE TABLE statements.
+    Returns ``{}`` when the source isn't a DDL file or the file can't be
+    read.
+    """
+    entry = _ancillary_entry_for(config, source_id)
+    if not entry:
+        return {}
+    if (entry.get("file_type") or "").lower() != "ddl":
+        return {}
+    filename = entry.get("file") or ""
+    if not filename:
+        return {}
+    try:
+        path = config_utils.resolve_ancillary_file(
+            cdm_name=config.cdm.domain,
+            filename=filename,
+            preprocessed=False,
+        )
+    except Exception:
+        return {}
+    text = _read_text(path)
+    if not text:
+        return {}
+    return extract_ddl_schemas(text)
+
+
+# ---------------------------------------------------------------------------
+# Public resolver
+# ---------------------------------------------------------------------------
+
+class SchemaResolver:
+    """
+    Build once per Mapping-tab generation; lookup per row.
+
+    Usage:
+        sr = SchemaResolver(config, outdir)
+        schema = sr.resolve(source_key="edw", source_entity="PaidHistory")
+    """
+
+    def __init__(self, config: AppConfig, outdir: Path):
+        self.config = config
+        self.outdir = outdir
+        self._fallback = (config.mapping.source_schema or "").strip()
+        # Per source_key -> {entity_lower: schema}
+        self._maps: Dict[str, Dict[str, str]] = {}
+
+    def _lookup_for(self, source_key: str) -> Dict[str, str]:
+        if source_key in self._maps:
+            return self._maps[source_key]
+        if source_key.lower() == "edw":
+            self._maps[source_key] = edw_schemas_from_rationalized(
+                self.outdir, self.config.cdm.domain
+            )
+        elif source_key.startswith("ancillary"):
+            self._maps[source_key] = ancillary_schemas_from_ddl(
+                self.config, source_key
+            )
+        else:
+            self._maps[source_key] = {}
+        return self._maps[source_key]
+
+    def resolve(self, source_key: str, source_entity: str) -> str:
+        """Return the schema for one source row, or the fallback when missing."""
+        if source_entity:
+            lookup = self._lookup_for(source_key)
+            schema = lookup.get(source_entity.lower())
+            if schema:
+                return schema
+        return self._fallback
+
+    def stats(self) -> Dict[str, int]:
+        """How many entries each source contributed to its lookup."""
+        return {src: len(m) for src, m in self._maps.items()}

@@ -23,13 +23,15 @@ new attribute.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from src.artifacts.common.cdm_extractor import CDMExtractor
+from src.artifacts.common.schema_resolver import SchemaResolver
 from src.artifacts.common.styles import ExcelStyles
 from src.config.config_parser import AppConfig
 
@@ -131,7 +133,7 @@ def _build_rows_for_attribute(
     cde_lookup: set,
     cdm_name: str,
     source_application: str,
-    source_schema: str,
+    schema_resolver: SchemaResolver,
 ) -> List[Dict[str, Any]]:
     """
     Produce one or more row dicts for a single CDM attribute, honouring the
@@ -175,13 +177,24 @@ def _build_rows_for_attribute(
     rows: List[Dict[str, Any]] = []
 
     def _row(src_table: str, src_column: str, contributing: Iterable[str]) -> Dict[str, Any]:
+        contrib = list(contributing)
+        # Schema is resolved per row: try each contributing source until one
+        # has a hit for this entity; fall back to the resolver's default.
+        resolved_schema = ""
+        if src_table:
+            for src_key in contrib:
+                resolved_schema = schema_resolver.resolve(src_key, src_table)
+                if resolved_schema:
+                    break
+            if not resolved_schema:
+                resolved_schema = schema_resolver.resolve("", src_table)
         src_full = ""
         if src_table or src_column:
-            parts = [p for p in [source_schema, src_table, src_column] if p]
+            parts = [p for p in [resolved_schema, src_table, src_column] if p]
             src_full = ".".join(parts)
         row = {
             "Source Application": source_application if (src_table or src_column) else "",
-            "Source Schema": source_schema if (src_table or src_column) else "",
+            "Source Schema": resolved_schema if (src_table or src_column) else "",
             "Source Table": src_table,
             "Source Column": src_column,
             "Source Full Name": src_full,
@@ -218,21 +231,38 @@ def _build_rows_for_attribute(
 # TAB ENTRY POINT
 # =============================================================================
 
-def create_mapping_tab(wb: Workbook, extractor: CDMExtractor, config: AppConfig) -> None:
+def create_mapping_tab(
+    wb: Workbook,
+    extractor: CDMExtractor,
+    config: AppConfig,
+    outdir: Optional["Path"] = None,
+) -> None:
     """
     Create the Mapping tab for Collibra ingestion.
 
-    Reads `config.mapping` for source_application, source_schema, and the
-    ordered list of mapping_sources (lineage keys).  If mapping_sources is
-    empty, emits a one-row placeholder notice.
+    Reads `config.mapping` for source_application, source_schema (used as
+    fallback only), and the ordered list of mapping_sources (lineage
+    keys).  When ``outdir`` is provided, the SchemaResolver auto-extracts
+    per-row schemas:
+      - "edw" rows → from rationalized_edw_<domain>_*.json
+      - "ancillary-*" DDL rows → parsed from the source DDL file
+      - everything else → falls back to ``mapping.source_schema``
+
+    If mapping_sources is empty, emits a one-row placeholder notice.
     """
     ws = wb.create_sheet("Mapping")
 
     mapping_cfg = config.mapping
     source_application = mapping_cfg.source_application or ""
-    source_schema = mapping_cfg.source_schema or ""
     mapping_sources = list(mapping_cfg.mapping_sources or [])
     cdm_name = config.cdm.domain or ""
+
+    # Auto-extracting schema resolver. Only useful when we know outdir
+    # (where the rationalized JSON lives).  When outdir is None, resolver
+    # always returns the config fallback.
+    if outdir is None:
+        outdir = Path(".")
+    schema_resolver = SchemaResolver(config, outdir)
 
     # Build CDE lookup from cdm["critical_data_elements"]
     cde_list = extractor.cdm.get("critical_data_elements", []) or []
@@ -281,8 +311,14 @@ def create_mapping_tab(wb: Workbook, extractor: CDMExtractor, config: AppConfig)
             cde_lookup=cde_lookup,
             cdm_name=cdm_name,
             source_application=source_application,
-            source_schema=source_schema,
+            schema_resolver=schema_resolver,
         ))
+
+    # Diagnostic: report which sources contributed schemas
+    stats = schema_resolver.stats()
+    if stats:
+        for src, n in stats.items():
+            print(f"      Schema lookup: {src} -> {n} entities")
 
     # Sort within-group by source table/column so consistent ordering
     all_rows.sort(key=lambda r: (

@@ -104,8 +104,10 @@ def generate_excel_cdm(
     # 3c. Mapping — Collibra source-to-target mapping, placed
     # immediately after Data_Dictionary_Lab so attribute-level tabs
     # stay grouped.
+    # Schema-resolver lookups read from outdir/rationalized/ and from the
+    # ancillary source files referenced by config — so pass the base outdir.
     print(f"      - Mapping")
-    create_mapping_tab(wb, extractor, config)
+    create_mapping_tab(wb, extractor, config, outdir=cdm_path.parent.parent)
 
     # 3d. Candidate CDEs - placed after Mapping so the CDE list sits
     # alongside the attribute-level tabs and can be referenced by the
