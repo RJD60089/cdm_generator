@@ -162,12 +162,25 @@ def _parse_source_ref(s: str) -> Optional[Dict[str, str]]:
     """
     Parse a rationalized source-ref string into its parts.
 
-    Expected formats (with or without the file prefix):
-      "<file>::<schema>.<table>::<column>"
-      "<file>::<table>::<column>"
-      "<file>::<schema>.<table>"
-      "<schema>.<table>.<column>"
-      "<schema>.<table>"
+    The rationalizer emits a few formats depending on source type:
+
+      DDL    (3 parts): "<file>::<schema>.<table>::<column>"
+      Excel  (4 parts): "<file>::<sheet>::<section>::<column>"
+      Excel  (4 parts): "<file>::<sheet>::<schema>.<section>::<column>"
+      Excel  (4 parts): "<file>::<sheet>::<db>.<schema>.<table>::<column>"
+      Generic 2 parts: "<file>::<column>"
+      No ::          : "<schema>.<table>.<column>" / "<schema>.<table>"
+
+    Strategy:
+      1. The LAST `::`-separated segment is always the column.
+      2. The SECOND-TO-LAST segment is the table identifier (which may
+         carry an arbitrary number of leading dotted prefixes — file
+         paths, database names, schema paths).
+      3. Within the table identifier, the LAST dotted segment is the
+         table; the segment immediately before it (if any) is the
+         schema.  Anything earlier (database, file path, etc.) is
+         dropped — those are typically meta and add noise to displayed
+         table.column references.
 
     Returns dict with 'schema'/'table'/'column' (any may be empty), or
     None if the string can't be split sensibly.
@@ -176,26 +189,34 @@ def _parse_source_ref(s: str) -> Optional[Dict[str, str]]:
         return None
     s = s.strip()
     parts = s.split("::")
+
     column = ""
-    schema_table = ""
-    if len(parts) >= 3:
-        schema_table = parts[1]
-        column = parts[2]
-    elif len(parts) == 2:
-        # could be "<file>::<schema>.<table>" or "<file>::<table>"
-        schema_table = parts[1]
+    table_qualifier = ""
+
+    if len(parts) >= 2:
+        column = parts[-1]
+        table_qualifier = parts[-2]
     else:
-        # No "::" — assume "<schema>.<table>(.<column>)"
-        schema_table = s
+        # No "::" — interpret as dotted form: split on dots, last segment
+        # is the column, everything before becomes the table_qualifier.
+        dotted = s.split(".")
+        if len(dotted) >= 2:
+            column = dotted[-1]
+            table_qualifier = ".".join(dotted[:-1])
+        else:
+            table_qualifier = s
+
+    # Within table_qualifier, immediate-last dotted segment = table;
+    # immediate preceding segment = schema (drop everything earlier).
     schema = ""
     table = ""
-    if "." in schema_table:
-        schema, table = schema_table.split(".", 1)
-        # If table itself contains a dot, the last segment may be a column
-        if "." in table and not column:
-            table, column = table.rsplit(".", 1)
+    if "." in table_qualifier:
+        qparts = table_qualifier.split(".")
+        table = qparts[-1].strip()
+        schema = qparts[-2].strip() if len(qparts) >= 2 else ""
     else:
-        table = schema_table
+        table = table_qualifier.strip()
+
     return {
         "schema": schema.strip(),
         "table":  table.strip(),
