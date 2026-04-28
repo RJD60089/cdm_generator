@@ -207,8 +207,14 @@ class ConfigGenerator(ConfigGeneratorBase):
         Returns minimal new-entry dicts for ancillary source files that
         exist on disk but are not yet referenced in
         ``input_files.ancillary``. Each new entry carries:
-            file, file_type (from extension), processing_mode="refiner",
-            source_id (slugified filename without extension)
+            file, file_type (from extension), processing_mode (prompted),
+            source_id (slugified filename without extension).
+
+        For each new file, the user is prompted to pick one of three
+        processing modes:
+            driver  — contributes to the Foundational CDM (entity-shaping)
+            refiner — refines the CDM during the refinement step
+            mapper  — used only for source-to-target mapping in Step 5
 
         Existing ancillary entries are NEVER modified by this method;
         the caller appends the returned list to whatever's already there
@@ -217,10 +223,22 @@ class ConfigGenerator(ConfigGeneratorBase):
         existing = (source_config.get("input_files") or {}).get("ancillary") or []
         existing_files = {(e.get("file") or "").lower() for e in existing}
 
-        new_entries: List[Dict] = []
+        # Discover candidates first so we can summarise before prompting
+        candidates: List[str] = []
         for filename in config_utils.list_ancillary_files(self.cdm_name):
-            if filename.lower() in existing_files:
-                continue
+            if filename.lower() not in existing_files:
+                candidates.append(filename)
+
+        if not candidates:
+            return []
+
+        print(f"\n   Found {len(candidates)} new ancillary file(s) — pick a processing mode for each:")
+        print(f"     d = driver   (contributes to Foundational CDM)")
+        print(f"     r = refiner  (refines the CDM during refinement step) [default]")
+        print(f"     m = mapper   (used only for Step 5 source-to-target mapping)")
+
+        new_entries: List[Dict] = []
+        for filename in candidates:
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
             file_type = {
                 "sql":  "ddl",
@@ -237,10 +255,27 @@ class ConfigGenerator(ConfigGeneratorBase):
             slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
             source_id = f"ancillary-{slug}" if slug else f"ancillary-{stem.lower()}"
 
+            # Prompt for processing_mode, default refiner (matches prior hardcoded value)
+            mode_default = "r"
+            while True:
+                raw = input(
+                    f"     '{filename}' ({file_type}) [d/r/m, default {mode_default}]: "
+                ).strip().lower() or mode_default
+                if raw in ("d", "driver"):
+                    mode = "driver"
+                    break
+                if raw in ("r", "refiner"):
+                    mode = "refiner"
+                    break
+                if raw in ("m", "mapper"):
+                    mode = "mapper"
+                    break
+                print(f"        ⚠️  Enter d, r, or m")
+
             new_entries.append({
                 "file":            filename,
                 "file_type":       file_type,
-                "processing_mode": "refiner",
+                "processing_mode": mode,
                 "source_id":       source_id,
             })
         return new_entries
