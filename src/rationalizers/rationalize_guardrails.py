@@ -350,6 +350,13 @@ Generate the rationalized JSON now."""
                 print(f"    ⚠️  Guardrails entry has no 'file' field, skipping: {gr_entry!r}")
                 continue
 
+            # Defensive filter for legacy configs: skip Excel lock files
+            # (~$file.xlsx) or hidden/system files that may have been
+            # auto-discovered before the discovery filter was tightened.
+            if gr_filename.startswith(("~", ".")):
+                print(f"    ⚠️  Skipping temp/hidden file: {gr_filename}")
+                continue
+
             # Resolve filename to full path
             gr_file = config_utils.resolve_guardrail_file(self.cdm_domain, gr_filename)
 

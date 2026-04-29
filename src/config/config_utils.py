@@ -103,38 +103,51 @@ def resolve_ddl_file(cdm_name: str, filename: str) -> Path:
     return get_cdm_dir(cdm_name) / "ddl" / filename
 
 
+def _is_real_file(name: str) -> bool:
+    """Filter for auto-discovery globs.
+
+    Excludes:
+      - Excel lock / temp files: '~$<filename>.xlsx' (Excel creates these
+        whenever a workbook is open).
+      - Hidden / system files: anything starting with '.' or '~'.
+    """
+    return bool(name) and not name.startswith(("~", "."))
+
+
 def list_guardrail_files(cdm_name: str) -> List[str]:
     """Auto-discover all guardrail filenames for a CDM.
-    
+
     Searches input/business/cdm_{name}/guardrail/ for *.xlsx files.
-    
+    Excludes Excel lock/temp files (~$*.xlsx) and hidden files.
+
     Args:
         cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
-        
+
     Returns:
         List of filenames (not full paths)
     """
     guardrail_dir = get_cdm_dir(cdm_name) / "guardrail"
     if not guardrail_dir.exists():
         return []
-    return [f.name for f in sorted(guardrail_dir.glob("*.xlsx"))]
+    return [f.name for f in sorted(guardrail_dir.glob("*.xlsx")) if _is_real_file(f.name)]
 
 
 def list_ddl_files(cdm_name: str) -> List[str]:
     """Auto-discover all DDL filenames for a CDM.
-    
+
     Searches input/business/cdm_{name}/ddl/ for *.sql files.
-    
+    Excludes hidden / temp files.
+
     Args:
         cdm_name: CDM name (e.g., 'benefit', 'Plan and Benefit')
-        
+
     Returns:
         List of filenames (not full paths)
     """
     ddl_dir = get_cdm_dir(cdm_name) / "ddl"
     if not ddl_dir.exists():
         return []
-    return [f.name for f in sorted(ddl_dir.glob("*.sql"))]
+    return [f.name for f in sorted(ddl_dir.glob("*.sql")) if _is_real_file(f.name)]
 
 
 def get_ancillary_dir(cdm_name: str) -> Path:
@@ -167,7 +180,7 @@ def list_ancillary_files(cdm_name: str) -> List[str]:
     supported = ("*.sql", "*.ddl", "*.txt", "*.json", "*.xlsx", "*.yaml", "*.csv")
     files: List[str] = []
     for pattern in supported:
-        files.extend(f.name for f in source_dir.glob(pattern))
+        files.extend(f.name for f in source_dir.glob(pattern) if _is_real_file(f.name))
     return sorted(set(files))
 
 
