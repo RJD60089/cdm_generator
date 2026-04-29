@@ -43,6 +43,7 @@ import pandas as pd
 
 from . import config_utils
 from .config_gen_core import ConfigGeneratorBase, prompt_user_choice
+from src.converters.guardrails_converter import _is_effectively_empty_df
 
 
 # How many data rows per tab to include in the triage prompt.  Small
@@ -115,12 +116,13 @@ class GuardrailsConfigGenerator(ConfigGeneratorBase):
         for sheet_name in xl.sheet_names:
             try:
                 df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=SAMPLE_ROWS_PER_TAB)
-                # Detect empty tabs up front — no rows AND no columns
-                # means truly empty; rows == 0 with header columns means
-                # a "header-only" tab with no data.  Both are equally
-                # useless for rationalization and get auto-excluded
-                # without an LLM call.
-                if len(df) == 0:
+                # Detect effectively-empty tabs up front — handles both:
+                #   - len(df) == 0 (no rows at all)
+                #   - "metadata + label row + blank below" pattern where
+                #     pandas consumed the metadata row as the header and
+                #     the only surviving data row is the column labels
+                # Both are auto-excluded without an LLM call.
+                if _is_effectively_empty_df(df):
                     out.append({
                         "sheet": sheet_name,
                         "columns": [str(c) for c in df.columns],

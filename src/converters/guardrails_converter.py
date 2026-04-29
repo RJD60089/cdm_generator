@@ -52,6 +52,40 @@ def _heuristic_should_skip(sheet_name: str) -> bool:
     return False
 
 
+def _is_effectively_empty_df(df) -> bool:
+    """
+    A sheet is "effectively empty" when it has no real data rows.
+
+    Beyond the obvious len(df) == 0 case, this also catches sheets like
+    the Navitus DGBee pattern where:
+      - File row 1 is some metadata (e.g. all "0" counts) which pandas
+        consumed as the header.
+      - File row 2 contains the actual column labels — pandas reads this
+        as data row 0.
+      - File row 3+ are all blank.
+
+    In that situation len(df) == 1 (just the labels), but there's no
+    real data underneath, so the tab carries zero rationalizable content.
+
+    Detection: drop all-NaN rows and check if any survives at dataframe
+    index >= 1.  If everything is at index 0 (or empty), the tab is
+    effectively empty.
+    """
+    if df is None:
+        return True
+    try:
+        df_clean = df.dropna(how="all")
+    except Exception:
+        return False
+    if df_clean.empty:
+        return True
+    try:
+        last_non_empty = int(df_clean.index.max())
+    except Exception:
+        return False
+    return last_non_empty < 1
+
+
 def convert_guardrails_to_json(
     file_path: str,
     include_sheets: Optional[List[str]] = None,
@@ -90,10 +124,11 @@ def convert_guardrails_to_json(
                 continue
 
         df = pd.read_excel(file_path, sheet_name=sheet_name)
-        # Skip sheets with no data rows — they have nothing to rationalize
-        # and just inflate the prompt.  An empty sheet by definition can't
-        # define a business entity.
-        if len(df) == 0:
+        # Skip effectively-empty sheets — len(df) == 0 plus the
+        # "metadata-row + label-row + nothing else" pattern that some
+        # workbooks use as section dividers.  Either case has no real
+        # rationalizable content.
+        if _is_effectively_empty_df(df):
             continue
         sheets[sheet_name] = df.to_dict('records')
 
