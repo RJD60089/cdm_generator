@@ -52,6 +52,42 @@ def _heuristic_should_skip(sheet_name: str) -> bool:
     return False
 
 
+# Minimum substantive data rows for a guardrails tab to count as
+# "rationalizable".  Below this threshold the tab is treated as
+# effectively empty regardless of how pandas read its headers.
+# Rationale: a guardrails tab with fewer than this many rows is almost
+# always a stub, a metadata header, or a label-only template — none of
+# which contribute meaningful business content to the CDM.
+MIN_SUBSTANTIVE_ROWS = 5
+
+
+def _is_effectively_empty_df(df) -> bool:
+    """
+    A sheet is "effectively empty" when it has fewer than
+    ``MIN_SUBSTANTIVE_ROWS`` non-empty rows after dropping all-NaN rows.
+
+    Catches three patterns the rationalizer should ignore:
+
+      1. Truly empty sheets (len(df) == 0).
+      2. Header-only sheets (rows == 0 with column headers).
+      3. Sheets like the Navitus DGBee pattern where row 1 is a
+         metadata / counts row (pandas consumes it as header), row 2
+         is column labels (pandas treats as data row 0), and rows 3+
+         are blank.
+      4. Stub tabs with a small number of rows (1-4).  In a guardrails
+         context these are template fragments, change-log entries,
+         or one-off references — not substantive enough to influence
+         CDM rationalization.
+    """
+    if df is None:
+        return True
+    try:
+        df_clean = df.dropna(how="all")
+    except Exception:
+        return False
+    return len(df_clean) < MIN_SUBSTANTIVE_ROWS
+
+
 def convert_guardrails_to_json(
     file_path: str,
     include_sheets: Optional[List[str]] = None,
@@ -90,10 +126,11 @@ def convert_guardrails_to_json(
                 continue
 
         df = pd.read_excel(file_path, sheet_name=sheet_name)
-        # Skip sheets with no data rows — they have nothing to rationalize
-        # and just inflate the prompt.  An empty sheet by definition can't
-        # define a business entity.
-        if len(df) == 0:
+        # Skip effectively-empty sheets — len(df) == 0 plus the
+        # "metadata-row + label-row + nothing else" pattern that some
+        # workbooks use as section dividers.  Either case has no real
+        # rationalizable content.
+        if _is_effectively_empty_df(df):
             continue
         sheets[sheet_name] = df.to_dict('records')
 
