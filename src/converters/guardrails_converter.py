@@ -90,6 +90,11 @@ def convert_guardrails_to_json(
                 continue
 
         df = pd.read_excel(file_path, sheet_name=sheet_name)
+        # Skip sheets with no data rows — they have nothing to rationalize
+        # and just inflate the prompt.  An empty sheet by definition can't
+        # define a business entity.
+        if len(df) == 0:
+            continue
         sheets[sheet_name] = df.to_dict('records')
 
     return {
