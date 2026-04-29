@@ -33,6 +33,7 @@ from .config_gen_ncpdp import NCPDPConfigGenerator
 from .config_gen_glue import GlueConfigGenerator
 from .config_gen_edw import EDWConfigGenerator
 from .config_gen_ancillary import AncillaryConfigGenerator
+from .config_gen_guardrails import GuardrailsConfigGenerator
 
 
 class ConfigGenerator(ConfigGeneratorBase):
@@ -53,6 +54,7 @@ class ConfigGenerator(ConfigGeneratorBase):
         self.glue_gen = GlueConfigGenerator(cdm_name, llm_client)
         self.edw_gen  = EDWConfigGenerator(cdm_name, llm_client)
         self.ancillary_gen = AncillaryConfigGenerator(cdm_name, llm_client)
+        self.guardrails_gen = GuardrailsConfigGenerator(cdm_name, llm_client)
     
     def run(self, dry_run: bool = False) -> Optional[Path]:
         """Execute config generation workflow.
@@ -101,10 +103,11 @@ class ConfigGenerator(ConfigGeneratorBase):
         glue_result = None
         edw_result = None
         ancillary_result = None
+        guardrails_result = None
 
         # Shortcut: skip every AI selector and only refresh the mapping block
         skip_ai = prompt_user_choice(
-            "\n   Skip AI selectors (FHIR/NCPDP/Glue/EDW/Ancillary) and only refresh mapping block?",
+            "\n   Skip AI selectors (FHIR/NCPDP/Guardrails/Glue/EDW/Ancillary) and only refresh mapping block?",
             default="N",
         )
 
@@ -120,6 +123,10 @@ class ConfigGenerator(ConfigGeneratorBase):
                 ncpdp_result = self.ncpdp_gen.run_analysis(source_config, dry_run)
                 if not dry_run and ncpdp_result:
                     ncpdp_result = self.ncpdp_gen.validate_codes(ncpdp_result)
+
+            # Guardrails Tab Triage — AI decides which sheets to include per file
+            if prompt_user_choice("\n   Run Guardrails tab triage (per-file include/exclude)?", default="Y"):
+                guardrails_result = self.guardrails_gen.run_analysis(source_config, dry_run)
 
             # Glue Analysis
             if prompt_user_choice("\n   Run Glue analysis?", default="Y"):
@@ -142,6 +149,7 @@ class ConfigGenerator(ConfigGeneratorBase):
             source_config, fhir_result, ncpdp_result, glue_result,
             guardrails_files, ddl_files, edw_result, ancillary_result,
             new_ancillaries=new_ancillaries,
+            guardrails_result=guardrails_result,
         )
         if prompt_user_choice("\n   Configure mapping block (Collibra)?", default="Y"):
             mapping_result = run_mapping_config(preview_config)
@@ -152,6 +160,7 @@ class ConfigGenerator(ConfigGeneratorBase):
             guardrails_files, ddl_files, edw_result, ancillary_result,
             mapping_result=mapping_result,
             new_ancillaries=new_ancillaries,
+            guardrails_result=guardrails_result,
         )
         
         # Step 5: Save with new timestamp
@@ -292,6 +301,7 @@ class ConfigGenerator(ConfigGeneratorBase):
         ancillary_result: Optional[Dict] = None,
         mapping_result: Optional[Dict] = None,
         new_ancillaries: Optional[List[Dict]] = None,
+        guardrails_result: Optional[Dict] = None,
     ) -> Dict:
         """Merge analysis results into source config.
         
@@ -316,8 +326,51 @@ class ConfigGenerator(ConfigGeneratorBase):
         if 'input_files' not in config:
             config['input_files'] = {}
         
-        # Always update guardrails and DDL from auto-discovery
-        config['input_files']['guardrails'] = guardrails_files
+        # ---- Guardrails — sync filenames + preserve any per-file triage state ----
+        # The list is allowed to be either plain strings (filename) or
+        # objects ({file, include_sheets, exclude_sheets, triage_reasons}).
+        # Auto-discovery refreshes the FILENAME set from the filesystem,
+        # but we preserve any prior object-form metadata for files that
+        # are still present.
+        existing_guardrails = (config.get('input_files') or {}).get('guardrails') or []
+        existing_by_filename: Dict[str, Dict] = {}
+        for entry in existing_guardrails:
+            if isinstance(entry, dict) and entry.get('file'):
+                existing_by_filename[entry['file']] = dict(entry)
+            elif isinstance(entry, str):
+                existing_by_filename[entry] = {"file": entry}
+
+        new_guardrails: List = []
+        for fname in guardrails_files:
+            if fname in existing_by_filename:
+                existing = existing_by_filename[fname]
+                # If only "file" key is set, drop back to plain-string form
+                # (don't pollute the config with empty objects).
+                keys = set(existing.keys()) - {"file"}
+                if keys:
+                    new_guardrails.append(existing)
+                else:
+                    new_guardrails.append(fname)
+            else:
+                new_guardrails.append(fname)
+
+        # If guardrails_result is provided (triage just ran), overlay its
+        # decisions onto matching entries.
+        if guardrails_result and 'guardrails' in guardrails_result:
+            triage_by_filename = {
+                e.get('file'): e for e in (guardrails_result['guardrails'] or [])
+                if isinstance(e, dict) and e.get('file')
+            }
+            overlaid: List = []
+            for entry in new_guardrails:
+                fname = entry if isinstance(entry, str) else entry.get('file')
+                if fname in triage_by_filename:
+                    overlaid.append(triage_by_filename[fname])
+                else:
+                    overlaid.append(entry)
+            new_guardrails = overlaid
+
+        config['input_files']['guardrails'] = new_guardrails
         config['input_files']['ddl'] = ddl_files
         
         # Update FHIR if analyzed

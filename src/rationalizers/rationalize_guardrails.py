@@ -41,25 +41,41 @@ class GuardrailsRationalizer:
         print(f"  Domain: {self.cdm_domain}")
         print(f"  Guardrails files: {len(self.guardrails_files)}")
     
-    def build_prompt(self, gr_file: str, prior_state: Optional[Dict] = None) -> str:
+    def build_prompt(
+        self,
+        gr_file: str,
+        prior_state: Optional[Dict] = None,
+        include_sheets: Optional[List[str]] = None,
+        exclude_sheets: Optional[List[str]] = None,
+    ) -> str:
         """
         Build Guardrails rationalization prompt for a single file.
-        
+
         Args:
             gr_file: Path to guardrails file to process
             prior_state: Previously rationalized state (None for first file)
-            
+            include_sheets: optional explicit allow-list of sheets to keep
+            exclude_sheets: optional list of sheets to skip
+
         Returns:
             Complete prompt string
         """
-        # Convert file to JSON
-        content = convert_guardrails_to_json(gr_file)
+        # Convert file to JSON, honouring the per-file sheet filters
+        content = convert_guardrails_to_json(
+            gr_file,
+            include_sheets=include_sheets,
+            exclude_sheets=exclude_sheets,
+        )
         filename = Path(gr_file).name
         tabs = list(content.get('sheets', {}).keys())
-        
+
         print(f"\n  File: {filename}")
         for tab in tabs:
             print(f"    - {tab}")
+        if include_sheets:
+            print(f"    (include_sheets filter: only {len(include_sheets)} tab(s) of {len(include_sheets)} kept)")
+        elif exclude_sheets:
+            print(f"    (exclude_sheets filter: dropped {len(exclude_sheets)} listed tab(s))")
         
         # Build prompt with CDM context
         prompt = f"""You are a business analyst engaged in developing a CDM for a PBM organization.
@@ -314,19 +330,43 @@ Generate the rationalized JSON now."""
         
         print(f"\n  Processing {total_files} guardrails file(s) iteratively...")
         
-        for idx, gr_filename in enumerate(self.guardrails_files, 1):
+        for idx, gr_entry in enumerate(self.guardrails_files, 1):
+            # Each entry can be a plain filename string OR an object
+            #   {file, include_sheets?, exclude_sheets?, triage_reasons?}
+            # produced by Step 0's tab-triage pass.
+            if isinstance(gr_entry, str):
+                gr_filename = gr_entry
+                include_sheets = None
+                exclude_sheets = None
+            elif isinstance(gr_entry, dict):
+                gr_filename = gr_entry.get('file', '')
+                include_sheets = gr_entry.get('include_sheets') or None
+                exclude_sheets = gr_entry.get('exclude_sheets') or None
+            else:
+                print(f"    ⚠️  Skipping unexpected guardrails entry: {gr_entry!r}")
+                continue
+
+            if not gr_filename:
+                print(f"    ⚠️  Guardrails entry has no 'file' field, skipping: {gr_entry!r}")
+                continue
+
             # Resolve filename to full path
             gr_file = config_utils.resolve_guardrail_file(self.cdm_domain, gr_filename)
-            
+
             print(f"\n  [{idx}/{total_files}] Processing: {gr_filename}")
-            
+
             # Verify file exists
             if not gr_file.exists():
                 print(f"    ⚠️  File not found: {gr_file}")
                 continue
-            
+
             # Build prompt (with prior state for files 2+)
-            prompt = self.build_prompt(str(gr_file), prior_state=rationalized_state)
+            prompt = self.build_prompt(
+                str(gr_file),
+                prior_state=rationalized_state,
+                include_sheets=include_sheets,
+                exclude_sheets=exclude_sheets,
+            )
             
             # Dry run - save prompts and continue
             if self.dry_run:
