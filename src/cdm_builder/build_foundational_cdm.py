@@ -178,7 +178,7 @@ entities into the CDM, unifying with internal business sources where they overla
 
 """
 
-    prompt += """
+    prompt += f"""
 
 ## GUARDRAILS ({gr_count} entities)
 Business-defined entities from internal APIs and governance:
