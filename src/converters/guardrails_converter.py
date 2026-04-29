@@ -1,33 +1,94 @@
 """
 Guardrails (DGBee Excel) converter.
 Converts DGBee format Excel files to JSON.
+
+Sheet filtering precedence (most specific first):
+  1. ``include_sheets`` — when provided, only those sheets are kept.
+  2. ``exclude_sheets`` — when provided, those sheets are skipped.
+  3. Built-in heuristic — case-insensitive matches against a list of
+     known noise tabs plus the substring "example" anywhere in the name.
+
+The first filter that matches wins; later ones are not consulted.
 """
 import json
 from pathlib import Path
-from openpyxl import load_workbook
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
-from pathlib import Path
+from openpyxl import load_workbook
 
 
-def convert_guardrails_to_json(file_path: str) -> dict:
-    # Skip these tabs - no entity/attribute data
-    SKIP_TABS = ['Glossary', 'DGBee Summary', 'API Summary', 'Data Dictionary']
-    
+# Default heuristic — case-insensitive match. Includes the common typo
+# "Glossory" alongside "Glossary".
+_DEFAULT_SKIP_NAMES = {
+    "glossary", "glossory",
+    "dgbee summary", "api summary",
+    "data dictionary",
+    "pod summary",
+    "assumptions", "assumption",
+    "not going to the cloud",
+    "out of scope", "deprecated",
+}
+# Substring (case-insensitive) — anything with this word is treated as
+# template/example data and skipped.
+_DEFAULT_SKIP_SUBSTRINGS = ("example", "template")
+
+
+def _heuristic_should_skip(sheet_name: str) -> bool:
+    n = (sheet_name or "").strip().lower()
+    if not n:
+        return True
+    if n in _DEFAULT_SKIP_NAMES:
+        return True
+    for sub in _DEFAULT_SKIP_SUBSTRINGS:
+        if sub in n:
+            return True
+    return False
+
+
+def convert_guardrails_to_json(
+    file_path: str,
+    include_sheets: Optional[List[str]] = None,
+    exclude_sheets: Optional[List[str]] = None,
+) -> dict:
+    """Convert a DGBee Excel guardrails file to a JSON-friendly dict.
+
+    Args:
+        file_path: path to the .xlsx
+        include_sheets: when provided, ONLY these tabs are kept
+            (case-sensitive exact match by sheet name). Heuristic is not
+            consulted.
+        exclude_sheets: when provided, these tabs are skipped (exact
+            match). Heuristic is consulted for everything else.
+
+    Returns:
+        ``{"source_file": <filename>, "sheets": {<name>: [{...rows...}]}}``
+    """
     xl = pd.ExcelFile(file_path)
-    sheets = {}
-    
+    sheets: Dict[str, Any] = {}
+
+    incl = set(include_sheets or [])
+    excl = set(exclude_sheets or [])
+
     for sheet_name in xl.sheet_names:
-        if sheet_name in SKIP_TABS:
-            continue  # Skip metadata tabs
-        
-        # Process data tabs and include tab name
+        # Precedence 1: explicit include list — strict allow-list mode
+        if incl:
+            if sheet_name not in incl:
+                continue
+        else:
+            # Precedence 2: explicit exclude list
+            if sheet_name in excl:
+                continue
+            # Precedence 3: built-in heuristic
+            if _heuristic_should_skip(sheet_name):
+                continue
+
         df = pd.read_excel(file_path, sheet_name=sheet_name)
         sheets[sheet_name] = df.to_dict('records')
-    
+
     return {
         'source_file': Path(file_path).name,
-        'sheets': sheets  # Only contains data tabs
+        'sheets': sheets,
     }
     
     # Process each "Data Elements" sheet
