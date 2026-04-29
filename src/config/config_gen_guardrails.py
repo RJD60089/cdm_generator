@@ -115,7 +115,19 @@ class GuardrailsConfigGenerator(ConfigGeneratorBase):
         for sheet_name in xl.sheet_names:
             try:
                 df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=SAMPLE_ROWS_PER_TAB)
-                # Capture column headers + sample rows
+                # Detect empty tabs up front — no rows AND no columns
+                # means truly empty; rows == 0 with header columns means
+                # a "header-only" tab with no data.  Both are equally
+                # useless for rationalization and get auto-excluded
+                # without an LLM call.
+                if len(df) == 0:
+                    out.append({
+                        "sheet": sheet_name,
+                        "columns": [str(c) for c in df.columns],
+                        "sample_rows": [],
+                        "is_empty": True,
+                    })
+                    continue
                 cols = [str(c) for c in df.columns]
                 rows = []
                 for _, row in df.iterrows():
@@ -213,46 +225,55 @@ class GuardrailsConfigGenerator(ConfigGeneratorBase):
             tab_data = self._summarize_tabs(file_path)
             print(f"      Tabs found: {len(tab_data)}")
             for t in tab_data:
-                print(f"        - {t['sheet']}")
+                empty_marker = "  (EMPTY)" if t.get("is_empty") else ""
+                print(f"        - {t['sheet']}{empty_marker}")
+
+            # Pre-triage: empty tabs always exclude — no LLM call needed.
+            # Empty by definition means no rationalizable content.
+            empty_tabs = [t["sheet"] for t in tab_data if t.get("is_empty")]
+            non_empty_tabs = [t for t in tab_data if not t.get("is_empty")]
 
             if dry_run:
                 # Save the prompt; return entry unchanged
-                prompt = self._build_prompt(filename, tab_data, domain, description)
+                prompt = self._build_prompt(filename, non_empty_tabs, domain, description)
                 if self.config_dir:
                     prompts_dir = self.config_dir / "prompts"
                     prompts_dir.mkdir(parents=True, exist_ok=True)
                     safe = filename.replace(" ", "_").replace("/", "_")
                     (prompts_dir / f"guardrails_triage_{safe}.txt").write_text(prompt, encoding="utf-8")
-                    print(f"      [dry run] prompt saved")
+                    print(f"      [dry run] prompt saved (empty tabs auto-excluded: {len(empty_tabs)})")
                 updated_entries.append(entry)
                 continue
 
-            prompt = self._build_prompt(filename, tab_data, domain, description)
-            decisions = self._call_triage_llm(prompt) or {}
-            decision_list = decisions.get("decisions") or []
-
             include: List[str] = []
-            exclude: List[str] = []
-            reasons: Dict[str, str] = {}
-            seen_sheets = set()
-            for d in decision_list:
-                sheet = (d.get("sheet") or "").strip()
-                if not sheet:
-                    continue
-                seen_sheets.add(sheet)
-                verdict = (d.get("decision") or "").strip().lower()
-                reasons[sheet] = (d.get("reason") or "").strip()
-                if verdict == "include":
-                    include.append(sheet)
-                elif verdict == "exclude":
-                    exclude.append(sheet)
+            exclude: List[str] = list(empty_tabs)  # auto-exclude all empty tabs
+            reasons: Dict[str, str] = {s: "Empty tab — no data rows" for s in empty_tabs}
 
-            # Any tab we sampled but the LLM didn't rule on — default to INCLUDE
-            # to fail safe (over-inclusion is recoverable; silent drops aren't).
-            for t in tab_data:
-                if t["sheet"] not in seen_sheets:
-                    include.append(t["sheet"])
-                    reasons[t["sheet"]] = "(no triage decision — defaulted to include)"
+            if non_empty_tabs:
+                prompt = self._build_prompt(filename, non_empty_tabs, domain, description)
+                decisions = self._call_triage_llm(prompt) or {}
+                decision_list = decisions.get("decisions") or []
+
+                seen_sheets = set(empty_tabs)
+                for d in decision_list:
+                    sheet = (d.get("sheet") or "").strip()
+                    if not sheet:
+                        continue
+                    seen_sheets.add(sheet)
+                    verdict = (d.get("decision") or "").strip().lower()
+                    reasons[sheet] = (d.get("reason") or "").strip()
+                    if verdict == "include":
+                        include.append(sheet)
+                    elif verdict == "exclude":
+                        exclude.append(sheet)
+
+                # Any non-empty tab we sampled but the LLM didn't rule on —
+                # default to INCLUDE to fail safe (over-inclusion is recoverable;
+                # silent drops aren't).
+                for t in non_empty_tabs:
+                    if t["sheet"] not in seen_sheets:
+                        include.append(t["sheet"])
+                        reasons[t["sheet"]] = "(no triage decision — defaulted to include)"
 
             print(f"      AI verdict: include={len(include)}, exclude={len(exclude)}")
             for s in include:
