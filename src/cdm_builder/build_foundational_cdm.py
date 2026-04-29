@@ -398,7 +398,22 @@ def run_step3a(
     glue_file = find_latest_rationalized(rationalized_dir, f"rationalized_glue_{domain_safe}")
     fhir_file = find_latest_rationalized(rationalized_dir, f"rationalized_fhir_{domain_safe}")
     ncpdp_file = find_latest_rationalized(rationalized_dir, f"rationalized_ncpdp_{domain_safe}")
-    edw_file = find_latest_rationalized(rationalized_dir, f"rationalized_edw_entities_{domain_safe}")
+
+    # EDW: prefer the FULL rationalized file (rationalized_edw_<domain>_*)
+    # which contains entities + all attribute detail.  The entities-only
+    # file (rationalized_edw_entities_<domain>_*) is produced by the EDW
+    # entity-selection step and has 0 attributes by design — feeding that
+    # to the foundational CDM build produces empty output because the
+    # LLM has no attribute content to model.  Fall back to the entities-
+    # only file only when no full file exists (legacy runs).
+    # Glob safety: f"rationalized_edw_{domain_safe}*" matches the full
+    # file but not the entities-only file because the literal domain
+    # name (e.g. "formulary") immediately follows "rationalized_edw_"
+    # in the full file, whereas the entities file has "entities_" in
+    # that slot.
+    edw_file = find_latest_rationalized(rationalized_dir, f"rationalized_edw_{domain_safe}")
+    if edw_file is None:
+        edw_file = find_latest_rationalized(rationalized_dir, f"rationalized_edw_entities_{domain_safe}")
 
     guardrails_data = load_rationalized_file(guardrails_file)
     glue_data = load_rationalized_file(glue_file)
