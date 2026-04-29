@@ -71,6 +71,10 @@ the CDM. Return decision = "exclude" if the tab is any of:
   - Example / template / sample data (anything with "example" or
     "template" in the name)
   - Assumptions, scope notes, design rationale
+  - FHIR reference / value-set / code-system tabs (anything with "FHIR"
+    in the name). FHIR content is rationalized separately from FHIR IGs;
+    including FHIR tabs from a guardrails file would re-rationalize the
+    same concepts twice and inflate the prompt.
   - Anti-list — tabs that LIST items the team has decided NOT to model
     in the CDM. Common names: "not going to the cloud", "out of scope",
     "deprecated", "rejected", "excluded". Anti-lists must ALWAYS be
@@ -78,8 +82,8 @@ the CDM. Return decision = "exclude" if the tab is any of:
   - Pivot / chart / supporting analysis tabs
 
 When in doubt, INCLUDE the tab — over-inclusion costs tokens, but
-under-inclusion silently drops business data. Exception: anti-list
-tabs are never in doubt — always exclude.
+under-inclusion silently drops business data. Exceptions that are never
+in doubt: anti-list tabs and FHIR-titled tabs — always exclude.
 
 File: {filename}
 

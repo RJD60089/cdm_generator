@@ -29,9 +29,15 @@ _DEFAULT_SKIP_NAMES = {
     "not going to the cloud",
     "out of scope", "deprecated",
 }
-# Substring (case-insensitive) — anything with this word is treated as
-# template/example data and skipped.
-_DEFAULT_SKIP_SUBSTRINGS = ("example", "template")
+# Substring (case-insensitive) — anything containing one of these is
+# treated as template / FHIR-duplicate / supporting content and skipped.
+#
+# - "example" / "template" — sample data tabs.
+# - "fhir" — FHIR reference/value-set/code-system tabs duplicate content
+#   already handled by the FHIR rationalizer (which reads FHIR IGs
+#   directly).  Including them in guardrails would re-rationalize the
+#   same FHIR concepts and inflate the prompt.
+_DEFAULT_SKIP_SUBSTRINGS = ("example", "template", "fhir")
 
 
 def _heuristic_should_skip(sheet_name: str) -> bool:
