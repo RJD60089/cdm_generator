@@ -46,9 +46,14 @@ from .config_gen_core import ConfigGeneratorBase, prompt_user_choice
 from src.converters.guardrails_converter import _is_effectively_empty_df
 
 
-# How many data rows per tab to include in the triage prompt.  Small
+# How many data rows per tab to SHOW in the triage prompt.  Small
 # enough to keep the prompt cheap, big enough to expose data shape.
 SAMPLE_ROWS_PER_TAB = 4
+
+# How many data rows to READ for the empty-detection check.  Needs to
+# be at least MIN_SUBSTANTIVE_ROWS so we can confidently distinguish
+# "1-4 stub rows" from ">= 5 real rows" without reading entire sheets.
+EMPTY_DETECT_NROWS = 10
 
 SYSTEM_PROMPT = (
     "You are a senior business analyst classifying spreadsheet tabs for "
@@ -115,13 +120,11 @@ class GuardrailsConfigGenerator(ConfigGeneratorBase):
         out: List[Dict[str, Any]] = []
         for sheet_name in xl.sheet_names:
             try:
-                df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=SAMPLE_ROWS_PER_TAB)
-                # Detect effectively-empty tabs up front — handles both:
-                #   - len(df) == 0 (no rows at all)
-                #   - "metadata + label row + blank below" pattern where
-                #     pandas consumed the metadata row as the header and
-                #     the only surviving data row is the column labels
-                # Both are auto-excluded without an LLM call.
+                # Read enough rows to make a confident empty-vs-substantive
+                # determination (>= MIN_SUBSTANTIVE_ROWS).  We only show
+                # the first SAMPLE_ROWS_PER_TAB to the LLM so the prompt
+                # stays small, but the empty check sees the larger sample.
+                df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=EMPTY_DETECT_NROWS)
                 if _is_effectively_empty_df(df):
                     out.append({
                         "sheet": sheet_name,
@@ -131,8 +134,10 @@ class GuardrailsConfigGenerator(ConfigGeneratorBase):
                     })
                     continue
                 cols = [str(c) for c in df.columns]
+                # Trim to SAMPLE_ROWS_PER_TAB for the LLM prompt
+                df_display = df.head(SAMPLE_ROWS_PER_TAB)
                 rows = []
-                for _, row in df.iterrows():
+                for _, row in df_display.iterrows():
                     rows.append({c: ("" if pd.isna(v) else str(v)[:120]) for c, v in zip(cols, row)})
                 out.append({
                     "sheet": sheet_name,

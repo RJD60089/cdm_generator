@@ -52,24 +52,32 @@ def _heuristic_should_skip(sheet_name: str) -> bool:
     return False
 
 
+# Minimum substantive data rows for a guardrails tab to count as
+# "rationalizable".  Below this threshold the tab is treated as
+# effectively empty regardless of how pandas read its headers.
+# Rationale: a guardrails tab with fewer than this many rows is almost
+# always a stub, a metadata header, or a label-only template — none of
+# which contribute meaningful business content to the CDM.
+MIN_SUBSTANTIVE_ROWS = 5
+
+
 def _is_effectively_empty_df(df) -> bool:
     """
-    A sheet is "effectively empty" when it has no real data rows.
+    A sheet is "effectively empty" when it has fewer than
+    ``MIN_SUBSTANTIVE_ROWS`` non-empty rows after dropping all-NaN rows.
 
-    Beyond the obvious len(df) == 0 case, this also catches sheets like
-    the Navitus DGBee pattern where:
-      - File row 1 is some metadata (e.g. all "0" counts) which pandas
-        consumed as the header.
-      - File row 2 contains the actual column labels — pandas reads this
-        as data row 0.
-      - File row 3+ are all blank.
+    Catches three patterns the rationalizer should ignore:
 
-    In that situation len(df) == 1 (just the labels), but there's no
-    real data underneath, so the tab carries zero rationalizable content.
-
-    Detection: drop all-NaN rows and check if any survives at dataframe
-    index >= 1.  If everything is at index 0 (or empty), the tab is
-    effectively empty.
+      1. Truly empty sheets (len(df) == 0).
+      2. Header-only sheets (rows == 0 with column headers).
+      3. Sheets like the Navitus DGBee pattern where row 1 is a
+         metadata / counts row (pandas consumes it as header), row 2
+         is column labels (pandas treats as data row 0), and rows 3+
+         are blank.
+      4. Stub tabs with a small number of rows (1-4).  In a guardrails
+         context these are template fragments, change-log entries,
+         or one-off references — not substantive enough to influence
+         CDM rationalization.
     """
     if df is None:
         return True
@@ -77,13 +85,7 @@ def _is_effectively_empty_df(df) -> bool:
         df_clean = df.dropna(how="all")
     except Exception:
         return False
-    if df_clean.empty:
-        return True
-    try:
-        last_non_empty = int(df_clean.index.max())
-    except Exception:
-        return False
-    return last_non_empty < 1
+    return len(df_clean) < MIN_SUBSTANTIVE_ROWS
 
 
 def convert_guardrails_to_json(
