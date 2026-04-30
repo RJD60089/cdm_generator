@@ -158,7 +158,9 @@ CRITICAL PRINCIPLES
 SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count + edw_count + ancillary_driver_count + ancillary_refiner_count} entities)
 =============================================================================
 
-These define YOUR actual business entities and hierarchy. Use these as the PRIMARY source for identifying Core entities.
+These define YOUR actual business entities and hierarchy.
+
+The primary driver of entity identification is the Ancillary Driver source when supplied, otherwise Guardrails. EDW, Glue, and Refiner Ancillary contribute as full participants: each MUST surface its unique business entities, every meaningful attribute it holds for shared entities, and every relationship it reveals. When multiple sources represent the same concept, unify them — the primary driver anchors entity identity and hierarchy; attributes and relationships are merged from every contributing source.
 """
 
     prompt += f"""
