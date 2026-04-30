@@ -80,13 +80,18 @@ def apply_match_files(
         for mapping_result in match_data.get("entity_mappings", []):
             source_entity_name = mapping_result.get("source_entity")
             source_entity = source_entities.get(source_entity_name, {})
+            # `or ""` guards against rationalized files where attribute_name
+            # is explicitly null — without it, .lower() crashes the same way
+            # maps_to_cdm_entity did.
             source_attrs = {
-                a.get("attribute_name", "").lower(): a 
+                (a.get("attribute_name") or "").lower(): a
                 for a in source_entity.get("attributes", [])
             }
             
-            entity_eval = mapping_result.get("entity_evaluation", {})
-            cdm_entity_name = entity_eval.get("maps_to_cdm_entity", "")
+            entity_eval = mapping_result.get("entity_evaluation", {}) or {}
+            # `or ""` guards against null in JSON (which dict.get's default
+            # does NOT cover — default only fires when the key is absent).
+            cdm_entity_name = entity_eval.get("maps_to_cdm_entity") or ""
             cdm_entity_normalized = cdm_entity_name.lower()
             
             # Update entity source_lineage (case-insensitive)
@@ -106,7 +111,9 @@ def apply_match_files(
             # Apply attribute mappings
             for attr_mapping in mapping_result.get("attribute_mappings", []):
                 disposition = attr_mapping.get("disposition")
-                source_attr_name = attr_mapping.get("source_attribute", "")
+                # `or ""` to coerce explicit null values in match files
+                # (default in .get() only fires for missing keys).
+                source_attr_name = attr_mapping.get("source_attribute") or ""
                 
                 if disposition == "mapped":
                     cdm_ent_name = attr_mapping.get("cdm_entity") or ""
