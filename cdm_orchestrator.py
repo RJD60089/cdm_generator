@@ -548,11 +548,14 @@ Examples:
                 if generate_cdm:
                     run_gap_analysis = prompt_user("Run gap analysis?", default="Y")
 
-                # Prompt: parallel match-file workers (only when actually
-                # going to call the LLM for matching).  1 = sequential.
-                # Tier 4 OpenAI accounts handle 8-16 comfortably.
+                # Prompt: parallel match-file workers.  Even in Reuse
+                # mode the refiner gate inside Step 5 may trigger
+                # ancillary re-mapping, so we ask any time LLM matching
+                # is enabled at all (i.e., not skip_mapping and not
+                # dry_run).  1 = sequential.  Tier 4 OpenAI accounts
+                # handle 8-16 comfortably.
                 match_workers = 1
-                if (sources_to_map or remap_all) and not dry_run:
+                if not skip_mapping and not dry_run:
                     raw = input(
                         "   Concurrent LLM workers for per-entity matching [1]: "
                     ).strip() or "1"
