@@ -106,19 +106,34 @@ class EDWConfigGenerator(ConfigGeneratorBase):
 - **Type**: {cdm_type}
 - **Description**: {description}
 
-# Task
+The CDM's scope is defined by the **Description** above, not by the domain
+name alone. Treat the Description's in-scope concepts and any explicit
+Includes/Excludes language as the authoritative scope.
 
-Review the {len(summaries)} EDW entity summaries below. Select ONLY the entities
-whose data is directly relevant to building the {domain} CDM.
+# EDW Entity Summaries ({len(summaries)} entities)
+
+{json.dumps(summaries, indent=2)}
+
+# Selection Task
+
+Select the EDW entities whose fields directly support the CDM scope as
+established by the Description above.
 
 # Selection Rules
 
-1. **Scope match** - Select entities whose fields directly support the CDM domain
-   described above. Use the description Includes/Excludes to guide scope precisely.
-2. **Exclude out-of-scope entities** - If an entity clearly belongs to a different
-   CDM domain, exclude it with a brief reason.
-4. **Conservative selection** - Prefer fewer, clearly relevant entities over many
-   marginal ones. A CDM typically draws from 5-15 EDW entities.
+1. **Match against the Description, not the domain name** - Each selected
+   entity MUST contain data that directly supports an entity, attribute, or
+   relationship that the Description establishes as in-scope. The domain
+   name alone is insufficient grounds for selection.
+
+2. **Ground every decision in the Description** - For both selections and
+   exclusions, the rationale MUST cite the specific Description language
+   (in-scope concepts or out-of-scope language) that drives the decision.
+
+3. **Select only what is required** - Build the smallest set that fully
+   satisfies the Description's scope. Each selected entity MUST trace to a
+   specific in-scope concept stated in the Description; entities that do
+   not trace to a Description concept belong in the excluded list.
 
 # Output Format
 
@@ -127,14 +142,10 @@ Return ONLY valid JSON -- no markdown, no code blocks:
 {{
   "selected_entities": ["ENTITY_ID_1", "ENTITY_ID_2"],
   "excluded_entities": [
-    {{"entity_id": "ENTITY_ID", "reason": "brief reason"}}
+    {{"entity_id": "ENTITY_ID", "reason": "brief reason citing Description"}}
   ],
-  "selection_rationale": "Brief explanation of the selection approach."
+  "selection_rationale": "Brief explanation grounded in Description scope."
 }}
-
-# EDW Entity Summaries
-
-{json.dumps(summaries, indent=2)}
 
 Return JSON only:"""
 
