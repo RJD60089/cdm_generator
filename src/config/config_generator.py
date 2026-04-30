@@ -124,17 +124,21 @@ class ConfigGenerator(ConfigGeneratorBase):
                 if not dry_run and ncpdp_result:
                     ncpdp_result = self.ncpdp_gen.validate_codes(ncpdp_result)
 
-            # Guardrails Tab Triage — AI decides which sheets to include per file
-            if prompt_user_choice("\n   Run Guardrails tab triage (per-file include/exclude)?", default="Y"):
+            # Guardrails Tab Triage — AI decides which sheets to include per file.
+            # Runs unconditionally when guardrails files exist (in config or on
+            # disk). Triage is correctness-critical: without it, anti-list tabs
+            # (items deliberately excluded from the CDM), FHIR reference tabs,
+            # glossaries, and templates all get sent to the rationalizer.
+            existing_gr = (source_config.get('input_files') or {}).get('guardrails') or []
+            if guardrails_files or existing_gr:
                 # First-pass seeding: when source_config has no guardrails
                 # listed yet (e.g., a freshly created config), populate the
-                # in-memory config with the auto-discovered file list before
-                # triage runs.  Otherwise triage sees an empty list, prints
-                # "nothing to triage", and the user must re-run config-gen
-                # a second time to actually trigger triage.
-                if guardrails_files and not (source_config.get('input_files') or {}).get('guardrails'):
+                # in-memory config with the auto-discovered file list so
+                # triage can see them.
+                if guardrails_files and not existing_gr:
                     source_config.setdefault('input_files', {})['guardrails'] = list(guardrails_files)
-                    print(f"   ℹ️  Seeded {len(guardrails_files)} auto-discovered guardrail file(s) into config for triage")
+                    print(f"\n   ℹ️  Seeded {len(guardrails_files)} auto-discovered guardrail file(s) into config")
+                print(f"\n   Running Guardrails tab triage (per-file include/exclude)...")
                 guardrails_result = self.guardrails_gen.run_analysis(source_config, dry_run)
 
             # Glue Analysis
