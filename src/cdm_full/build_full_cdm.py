@@ -261,25 +261,32 @@ def run_build_full_cdm(
         with open(gap_file, 'r', encoding='utf-8') as f:
             gap_data = json.load(f)
 
+        # Restrict the gate to REFINER-mode unmapped fields only.  Mapper-
+        # mode ancillaries are explicitly source-to-target mapping only —
+        # they must NOT drive CDM modifications.  Pre-filter both the
+        # trigger count and the data passed to refinement.
+        refiner_set = set(refiner_sources_in_pipeline)
         unmapped = gap_data.get("unmapped_fields", [])
         ancillary_unmapped = [
             u for u in unmapped
-            if u.get("source_type", "").lower().startswith("ancillary")
+            if (u.get("source_type") or "") in refiner_set
         ]
 
         if ancillary_unmapped:
             print(f"\n   {'─'*50}")
             print(f"   ANCILLARY REFINER GATE")
             print(f"   {'─'*50}")
-            print(f"   Ancillary mapping found {len(ancillary_unmapped)} unmapped fields.")
+            print(f"   Refiner-source unmapped fields: {len(ancillary_unmapped)}")
             print(f"   Refiner sources: {', '.join(refiner_sources_in_pipeline)}")
 
             from src.config.config_gen_core import prompt_user_choice
             if prompt_user_choice("   Run CDM refinement based on these gaps?", default="Y"):
 
-                # Load and merge rationalized data from all ancillary sources
+                # Merge rationalized data ONLY from refiner-mode ancillary
+                # sources — mapper sources are excluded so their entities
+                # cannot influence CDM refinement.
                 merged_ancillary_data = {"entities": []}
-                for anc_src in ancillary_source_types:
+                for anc_src in refiner_sources_in_pipeline:
                     anc_file = discovered_sources.get(anc_src)
                     if anc_file:
                         with open(anc_file, 'r', encoding='utf-8') as f:
