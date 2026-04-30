@@ -32,7 +32,8 @@ def build_prompt(
     fhir_data: Optional[Dict] = None,
     ncpdp_data: Optional[Dict] = None,
     edw_data: Optional[Dict] = None,
-    ancillary_prefoundation: Optional[Dict] = None
+    ancillary_prefoundation: Optional[Dict] = None,
+    ancillary_refiner_data: Optional[Dict] = None
 ) -> str:
     """
     Build prompt to generate CDM from config and rationalized sources.
@@ -87,16 +88,18 @@ def build_prompt(
     fhir_section = format_source(fhir_data, "FHIR")
     ncpdp_section = format_source(ncpdp_data, "NCPDP")
     edw_section = format_source(edw_data, "EDW")
-    
+    ancillary_refiner_section = format_source(ancillary_refiner_data, "Ancillary")
+
     # Helper to get entities from either key
     def get_entities(data: Optional[Dict]) -> list:
         if not data:
             return []
         return data.get('entities', data.get('rationalized_entities', []))
-    
+
     # Count what we have
     gr_count = len(get_entities(guardrails_data))
     glue_count = len(get_entities(glue_data))
+    ancillary_refiner_count = len(get_entities(ancillary_refiner_data))
     fhir_count = len(get_entities(fhir_data))
     ncpdp_count = len(get_entities(ncpdp_data))
     edw_count = len(get_entities(edw_data))
@@ -150,7 +153,7 @@ CRITICAL PRINCIPLES
 ** When multiple standard resources represent the same concept at different technical levels (e.g., routing from NCPDP T and routing from internal files), unify them unless both levels are explicitly required for conceptual modeling.
 
 =============================================================================
-SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count + edw_count} entities)
+SOURCE FILES - INTERNAL BUSINESS ({gr_count + glue_count + edw_count + ancillary_refiner_count} entities)
 =============================================================================
 
 These define YOUR actual business entities and hierarchy. Use these as the PRIMARY source for identifying Core entities.
@@ -194,6 +197,11 @@ Operational entities from data pipeline/warehouse:
 Enterprise data warehouse tables — actual stored business data:
 
 {edw_section}
+
+## ANCILLARY ({ancillary_refiner_count} entities)
+CDM-specific source system definitions — schemas, data models, and specifications:
+
+{ancillary_refiner_section}
 
 =============================================================================
 SOURCE FILES - INDUSTRY STANDARDS ({fhir_count + ncpdp_count} entities)
@@ -431,28 +439,50 @@ def run_step3a(
             print(f"      Ancillary: scaffold loaded ({prefoundation_file.name})")
         else:
             print(f"      Ancillary: Driver mode configured but no pre-foundation found")
-    
+
+    # Load ancillary refiner sources (included as source data, not scaffold)
+    ancillary_refiner_data = None
+    if hasattr(config, 'get_ancillary_by_mode') and config.get_ancillary_by_mode('refiner'):
+        refiner_ids = [a.get('source_id') for a in config.get_ancillary_by_mode('refiner')]
+        merged_entities = []
+        refiner_files_loaded = []
+        for rid in refiner_ids:
+            rfile = find_latest_rationalized(rationalized_dir, f"rationalized_{rid}_{domain_safe}")
+            if rfile:
+                rdata = load_rationalized_file(rfile)
+                if rdata:
+                    merged_entities.extend(
+                        rdata.get('entities', rdata.get('rationalized_entities', []))
+                    )
+                    refiner_files_loaded.append(rfile.name)
+        if merged_entities:
+            ancillary_refiner_data = {"entities": merged_entities}
+            print(f"      Ancillary: {len(merged_entities)} refiner entities from {len(refiner_files_loaded)} file(s)")
+
     # Helper to get entities from either key format
     def get_entity_count(data):
         if not data:
             return 0
         return len(data.get('entities', data.get('rationalized_entities', [])))
-    
+
     # Report what we found
     gr_count = get_entity_count(guardrails_data)
     glue_count = get_entity_count(glue_data)
     fhir_count = get_entity_count(fhir_data)
     ncpdp_count = get_entity_count(ncpdp_data)
     edw_count = get_entity_count(edw_data)
-    
+    ancillary_refiner_count = get_entity_count(ancillary_refiner_data)
+
     print(f"   📊 Sources loaded:")
     print(f"      Guardrails: {gr_count} entities" + (f" ({guardrails_file.name})" if guardrails_file else " (not found)"))
     print(f"      Glue:       {glue_count} entities" + (f" ({glue_file.name})" if glue_file else " (not found)"))
     print(f"      EDW:        {edw_count} entities" + (f" ({edw_file.name})" if edw_file else " (not found)"))
     print(f"      FHIR:       {fhir_count} entities" + (f" ({fhir_file.name})" if fhir_file else " (not found)"))
     print(f"      NCPDP:      {ncpdp_count} entities" + (f" ({ncpdp_file.name})" if ncpdp_file else " (not found)"))
-    
-    total_entities = gr_count + glue_count + fhir_count + ncpdp_count + edw_count
+    if ancillary_refiner_count:
+        print(f"      Ancillary:  {ancillary_refiner_count} entities (refiner mode)")
+
+    total_entities = gr_count + glue_count + fhir_count + ncpdp_count + edw_count + ancillary_refiner_count
     if total_entities == 0:
         print(f"   ⚠️  WARNING: No rationalized sources found. Run Step 1 first.")
         if not dry_run:
@@ -467,7 +497,8 @@ def run_step3a(
         fhir_data=fhir_data,
         ncpdp_data=ncpdp_data,
         edw_data=edw_data,
-        ancillary_prefoundation=ancillary_prefoundation_data
+        ancillary_prefoundation=ancillary_prefoundation_data,
+        ancillary_refiner_data=ancillary_refiner_data
     )
     
     # Ensure output directory exists
@@ -528,7 +559,8 @@ def run_step3a(
             "guardrails": guardrails_file.name if guardrails_file else None,
             "glue": glue_file.name if glue_file else None,
             "fhir": fhir_file.name if fhir_file else None,
-            "ncpdp": ncpdp_file.name if ncpdp_file else None
+            "ncpdp": ncpdp_file.name if ncpdp_file else None,
+            "ancillary_refiner": "included" if ancillary_refiner_data else None
         }
         
         # Save output
