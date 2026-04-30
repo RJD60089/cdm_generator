@@ -80,8 +80,11 @@ def apply_match_files(
         for mapping_result in match_data.get("entity_mappings", []):
             source_entity_name = mapping_result.get("source_entity")
             source_entity = source_entities.get(source_entity_name, {})
+            # `or ""` guards against rationalized files where attribute_name
+            # is explicitly null — without it, .lower() crashes the same way
+            # maps_to_cdm_entity did.
             source_attrs = {
-                a.get("attribute_name", "").lower(): a 
+                (a.get("attribute_name") or "").lower(): a
                 for a in source_entity.get("attributes", [])
             }
             
