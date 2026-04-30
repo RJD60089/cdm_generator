@@ -126,6 +126,15 @@ class ConfigGenerator(ConfigGeneratorBase):
 
             # Guardrails Tab Triage — AI decides which sheets to include per file
             if prompt_user_choice("\n   Run Guardrails tab triage (per-file include/exclude)?", default="Y"):
+                # First-pass seeding: when source_config has no guardrails
+                # listed yet (e.g., a freshly created config), populate the
+                # in-memory config with the auto-discovered file list before
+                # triage runs.  Otherwise triage sees an empty list, prints
+                # "nothing to triage", and the user must re-run config-gen
+                # a second time to actually trigger triage.
+                if guardrails_files and not (source_config.get('input_files') or {}).get('guardrails'):
+                    source_config.setdefault('input_files', {})['guardrails'] = list(guardrails_files)
+                    print(f"   ℹ️  Seeded {len(guardrails_files)} auto-discovered guardrail file(s) into config for triage")
                 guardrails_result = self.guardrails_gen.run_analysis(source_config, dry_run)
 
             # Glue Analysis
