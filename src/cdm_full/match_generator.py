@@ -21,17 +21,29 @@ Functions:
 """
 from __future__ import annotations
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.config.config_parser import AppConfig
 from src.core.llm_client import LLMClient
 
 
 # Entities with more attributes than this threshold are processed in batches
-BATCH_THRESHOLD = 150
-BATCH_SIZE = 150
+# Entities with attribute counts above this threshold get split into
+# sequential batches.  Raised from 150 -> 500 because:
+#   1. Modern LLMs (gpt-5.x with 922K context) handle 500-attribute
+#      prompts comfortably; the original 150 was tuned for older models.
+#   2. Sequential batches inside one entity become the bottleneck under
+#      per-entity parallelism — fewer batched entities = better wall-
+#      clock when worker count > 1.
+#   3. Most CDM entities have <= 50 attributes anyway; only a handful
+#      of "kitchen sink" entities (e.g. Claims's ClaimTransaction at
+#      181 attrs) ever hit the previous threshold.
+BATCH_THRESHOLD = 500
+BATCH_SIZE = 500
 
 
 # =============================================================================
@@ -453,12 +465,23 @@ def generate_match_file(
     full_cdm_dir: Path,
     domain_description: str,
     dry_run: bool = False,
+    max_workers: int = 1,
 ) -> Optional[Path]:
     """
     Generate match file for a single source.
 
-    Small entities (<=150 attrs): single AI call — original behaviour.
-    Large entities (>150 attrs):  batches of 150, names-only context for remainder.
+    Small entities (<=BATCH_THRESHOLD attrs): single AI call.
+    Large entities  (> BATCH_THRESHOLD attrs): sequential batches of
+        BATCH_SIZE; entity_evaluation from batch 1 is reused for 2..N
+        so batches stay in order within a single entity.
+
+    Per-entity execution is parallelisable: with ``max_workers > 1``
+    the per-entity loop runs in a ThreadPoolExecutor.  LLM calls are
+    I/O-bound so threads are sufficient.  Entities are dispatched
+    largest-first (longest-processing-time scheduling) so the longest
+    entity occupies one worker for the duration while smaller entities
+    chew through the rest in parallel — total wall-clock approaches the
+    time of the largest entity.
 
     Args:
         config: App configuration
@@ -469,6 +492,9 @@ def generate_match_file(
         full_cdm_dir: Output directory for match files
         domain_description: Domain context description
         dry_run: If True, save example prompts only
+        max_workers: Concurrent per-entity worker count (default 1 =
+            sequential).  Per-entity calls are independent, so threads
+            are safe.  Tier 4: 8-16 reasonable.
 
     Returns:
         Path to match file, or None if dry_run
@@ -519,29 +545,36 @@ def generate_match_file(
         return None
 
     # ── LIVE ─────────────────────────────────────────────────────────────────
-    entity_mappings = []
-    ai_failures = []
+    entity_mappings: List[Dict[str, Any]] = []
+    ai_failures: List[Dict[str, Any]] = []
 
-    for idx, source_entity in enumerate(source_entities, 1):
+    # Sort largest-first so the longest entity occupies one worker for the
+    # full duration while the remaining workers churn through smaller
+    # entities in parallel — minimises total wall-clock under threading.
+    sorted_entities = sorted(
+        source_entities,
+        key=lambda e: -len(e.get("attributes", [])),
+    )
+    total = len(sorted_entities)
+    workers = max(1, int(max_workers))
+
+    log_lock = threading.Lock()
+    progress = {"done": 0}
+
+    def _process_entity(source_entity: Dict[str, Any]) -> Tuple[Optional[Dict], Optional[Dict]]:
         entity_name = source_entity.get("entity_name")
         attr_count = len(source_entity.get("attributes", []))
         n_batches = -(-attr_count // BATCH_SIZE)  # ceiling division
 
         try:
             if attr_count > BATCH_THRESHOLD:
-                # ── Chunked path ──────────────────────────────────────────
-                print(
-                    f"   [{idx}/{len(source_entities)}] {entity_name} "
-                    f"({attr_count} attrs → {n_batches} batches)"
-                )
                 entity_evaluation, all_mappings = _map_entity_chunked(
                     config, source_type, compact_catalog,
-                    source_entity, domain_description, llm
+                    source_entity, domain_description, llm,
                 )
                 mapped = sum(1 for m in all_mappings if m.get("disposition") == "mapped")
                 unmapped = sum(1 for m in all_mappings if m.get("disposition") == "unmapped")
                 review = sum(1 for m in all_mappings if m.get("requires_review"))
-
                 result = {
                     "source_type": source_type,
                     "source_entity": entity_name,
@@ -554,22 +587,11 @@ def generate_match_file(
                         "requires_review": review,
                     },
                 }
-                print(
-                    f"       TOTAL → mapped: {mapped}, "
-                    f"unmapped: {unmapped}, review: {review}"
-                )
-
+                shape = f"{attr_count} attrs → {n_batches} batches"
             else:
-                # ── Single-call path ──────────────────────────────────────
-                print(
-                    f"   [{idx}/{len(source_entities)}] {entity_name} "
-                    f"({attr_count} attrs)...",
-                    end=" ",
-                    flush=True,
-                )
                 prompt = build_source_entity_prompt(
                     config, source_type, compact_catalog,
-                    source_entity, domain_description
+                    source_entity, domain_description,
                 )
                 messages = [
                     {
@@ -582,23 +604,51 @@ def generate_match_file(
                     {"role": "user", "content": prompt},
                 ]
                 result = _parse_response(llm.chat(messages)[0])
+                shape = f"{attr_count} attrs"
+
+            with log_lock:
+                progress["done"] += 1
+                idx = progress["done"]
                 summary = result.get("summary", {})
                 print(
+                    f"   [{idx}/{total}] {entity_name} ({shape}) — "
                     f"mapped: {summary.get('mapped', 0)}, "
                     f"unmapped: {summary.get('unmapped', 0)}, "
                     f"review: {summary.get('requires_review', 0)}"
                 )
-
-            entity_mappings.append(result)
+            return result, None
 
         except Exception as exc:
-            print(f"FAILED: {exc}")
-            ai_failures.append({
+            failure = {
                 "source_entity": entity_name,
                 "attribute_count": attr_count,
                 "error": str(exc),
                 "timestamp": datetime.now().isoformat(),
-            })
+            }
+            with log_lock:
+                progress["done"] += 1
+                idx = progress["done"]
+                print(f"   [{idx}/{total}] {entity_name} FAILED: {exc}")
+            return None, failure
+
+    if workers == 1:
+        # Sequential — preserves prior log shape for users running serial
+        for source_entity in sorted_entities:
+            r, f = _process_entity(source_entity)
+            if r is not None:
+                entity_mappings.append(r)
+            if f is not None:
+                ai_failures.append(f)
+    else:
+        # Parallel — each entity is independent; futures complete in any order
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_process_entity, e) for e in sorted_entities]
+            for fut in as_completed(futures):
+                r, f = fut.result()
+                if r is not None:
+                    entity_mappings.append(r)
+                if f is not None:
+                    ai_failures.append(f)
 
     # ── Save match file ───────────────────────────────────────────────────────
     match_file_data = {

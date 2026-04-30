@@ -542,12 +542,26 @@ Examples:
                 
                 # Prompt: Generate full CDM?
                 generate_cdm = prompt_user("\nGenerate Full CDM?", default="Y")
-                
+
                 # Prompt: Run gap analysis?
                 run_gap_analysis = False
                 if generate_cdm:
                     run_gap_analysis = prompt_user("Run gap analysis?", default="Y")
-                
+
+                # Prompt: parallel match-file workers (only when actually
+                # going to call the LLM for matching).  1 = sequential.
+                # Tier 4 OpenAI accounts handle 8-16 comfortably.
+                match_workers = 1
+                if (sources_to_map or remap_all) and not dry_run:
+                    raw = input(
+                        "   Concurrent LLM workers for per-entity matching [1]: "
+                    ).strip() or "1"
+                    try:
+                        match_workers = max(1, int(raw))
+                    except ValueError:
+                        print(f"   ⚠️  Invalid worker count '{raw}' — falling back to sequential (1)")
+                        match_workers = 1
+
                 # Execute
                 if generate_cdm or sources_to_map or dry_run:
                     full_cdm = run_build_full_cdm(
@@ -559,7 +573,8 @@ Examples:
                         sources_to_map=sources_to_map if sources_to_map else None,
                         skip_mapping=skip_mapping,
                         generate_cdm=generate_cdm,
-                        run_gap_analysis=run_gap_analysis
+                        run_gap_analysis=run_gap_analysis,
+                        match_workers=match_workers,
                     )
                 else:
                     print(f"   ○ Step 6 cancelled by user")

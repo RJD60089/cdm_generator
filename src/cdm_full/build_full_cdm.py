@@ -65,12 +65,13 @@ def run_build_full_cdm(
     sources_to_map: Optional[List[str]] = None,
     skip_mapping: bool = False,
     generate_cdm: bool = True,
-    run_gap_analysis: bool = True
+    run_gap_analysis: bool = True,
+    match_workers: int = 1,
 ) -> Optional[Dict]:
     """
     Main entry point for Full CDM generation (Step 5).
     Orchestrator controls flow via parameters.
-    
+
     Args:
         config: App configuration
         cdm_file: Path to foundational CDM (None to auto-find latest)
@@ -81,7 +82,9 @@ def run_build_full_cdm(
         skip_mapping: If True, skip all mapping and use existing match files
         generate_cdm: If True, generate full CDM from match files
         run_gap_analysis: If True, generate gap report
-        
+        match_workers: Per-entity concurrency in generate_match_file
+            (default 1 = sequential).  Tier 4: 8-16 reasonable.
+
     Returns:
         Full CDM dict (None if dry_run or generate_cdm=False)
     """
@@ -187,7 +190,8 @@ def run_build_full_cdm(
                 llm=llm,
                 full_cdm_dir=full_cdm_dir,
                 domain_description=domain_description,
-                dry_run=dry_run
+                dry_run=dry_run,
+                max_workers=match_workers,
             )
             
             if match_file:
@@ -316,6 +320,7 @@ def run_build_full_cdm(
                             full_cdm_dir=full_cdm_dir,
                             domain_description=domain_description,
                             dry_run=dry_run,
+                            max_workers=match_workers,
                         )
                         if anc_match:
                             match_files[anc_source] = anc_match
