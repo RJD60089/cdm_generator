@@ -19,7 +19,7 @@ class FHIRRationalizer:
         self.dry_run = dry_run
         self.prompts_dir: Optional[Path] = None
         
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
         self.cdm_domain = self.config.get('cdm', {}).get('domain', '')
