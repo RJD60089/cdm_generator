@@ -106,6 +106,303 @@ def run_step0_config_generation(cdm_name: str, llm: Optional[LLMClient] = None, 
     return latest or base
 
 
+def run_auto(
+    cdm_name: str,
+    model_key: str = "gpt-5",
+    workers: int = 16,
+    steps_to_run: Optional[set] = None,
+    gap_threshold: float = 0.8,
+    reject_all_gaps: bool = False,
+) -> None:
+    """Unattended end-to-end CDM build (Steps 1–6) using config-driven defaults.
+
+    Preconditions:
+      Step 0 (config generation) has already produced a valid config for
+      <cdm_name>.  Auto mode does NOT run config-gen — it fails fast with
+      a clear error if no config is found.
+
+    Pipeline behaviour:
+      Step 1  — Run every rationalizer the config has data for, in parallel.
+      Step 2  — Build foundational CDM (single LLM call).
+      Step 3  — Consolidation refinement: auto-reject all recommendations.
+      Step 4  — PK/FK validation: auto-reject all findings.
+      Step 5  — Build Full CDM with `Remap All` mode and gap analysis.  The
+                refiner gate (if triggered) uses confidence-threshold review
+                via `auto_threshold` (default 0.8).
+      Step 5p — Run every post-process step (rematch, field_codes, ancillary,
+                sensitivity, cde).
+      Step 6  — Generate every artifact (Excel, DDL SQL, LucidChart CSV, Word
+                DDL) plus AI rule consolidation.
+
+    Args:
+        cdm_name: CDM name matching an existing config.
+        model_key: Key into MODEL_OPTIONS — default 'gpt-5'.
+        workers: Concurrent LLM workers for per-entity match generation
+            and rule consolidation.  Default 16 (assumes Tier 4 OpenAI).
+        steps_to_run: Set of step ints (1–6) to execute.  Default = all.
+        gap_threshold: Confidence threshold for auto-approving gap-driven
+            refinement recommendations (0.0–1.0).  Default 0.8.
+        reject_all_gaps: If True, sets the threshold to 1.01 — rejects all
+            gap recommendations.  Equivalent to --reject-all-gaps CLI flag.
+    """
+    if steps_to_run is None:
+        steps_to_run = {1, 2, 3, 4, 5, 6}
+
+    if reject_all_gaps:
+        gap_threshold = 1.01  # > 1.0 means nothing passes
+
+    print(f"\n{'='*60}")
+    print(f"CDM AUTO ORCHESTRATION (unattended)")
+    print(f"{'='*60}")
+    print(f"   CDM         : {cdm_name}")
+    print(f"   Model       : {model_key}")
+    print(f"   Workers     : {workers}")
+    print(f"   Steps       : {sorted(steps_to_run)}")
+    print(f"   Gap thresh. : {'reject-all' if reject_all_gaps else f'{gap_threshold:.0%}'}")
+    print(f"{'='*60}")
+
+    # --- Find existing config (auto mode does NOT run Step 0) ---
+    config_file = find_latest_config(cdm_name) or find_base_config(cdm_name)
+    if not config_file:
+        print(f"\n❌ No config found for CDM: {cdm_name}", file=sys.stderr)
+        print(f"   Auto mode requires Step 0 to have already run.", file=sys.stderr)
+        print(f"   Run interactively first: python cdm_orchestrator.py {cdm_name}", file=sys.stderr)
+        sys.exit(1)
+    print(f"\n   Config: {config_file.name}")
+
+    config = load_config(str(config_file))
+    print(f"   Domain: {config.cdm.domain}")
+
+    # --- Build LLM client ---
+    if model_key not in MODEL_OPTIONS:
+        print(f"\n❌ Unknown model: {model_key}", file=sys.stderr)
+        print(f"   Available: {', '.join(MODEL_OPTIONS.keys())}", file=sys.stderr)
+        sys.exit(1)
+    model_config = MODEL_OPTIONS[model_key]
+    llm = LLMClient(
+        model=model_config['model'],
+        base_url=model_config['base_url'](),
+        temperature=0.2,
+        timeout=1800,
+    )
+    print(f"   LLM   : {llm.model}")
+
+    base_outdir = Path(config.output.directory)
+    base_outdir.mkdir(parents=True, exist_ok=True)
+
+    # ============================================================
+    # STEP 1: RATIONALIZE — parallel by source
+    # ============================================================
+    if 1 in steps_to_run:
+        print(f"\n{'='*60}")
+        print(f"STEP 1: INPUT RATIONALIZATION (auto)")
+        print(f"{'='*60}")
+
+        rationalized_outdir = base_outdir / "rationalized"
+        rationalized_outdir.mkdir(parents=True, exist_ok=True)
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from functools import partial
+        from src.rationalizers import (
+            run_fhir_rationalization,
+            run_ncpdp_rationalization,
+            run_guardrails_rationalization,
+            run_glue_rationalization,
+            run_edw_rationalization,
+        )
+        from src.rationalizers.rationalize_ancillary import run_ancillary_rationalization
+
+        common_kwargs = dict(
+            config=config,
+            outdir=rationalized_outdir,
+            llm=llm,
+            dry_run=False,
+            config_path=str(config_file),
+        )
+
+        tasks = []
+        if config.has_fhir():
+            tasks.append(("FHIR",       partial(run_fhir_rationalization,       **common_kwargs)))
+        if config.has_ncpdp():
+            tasks.append(("NCPDP",      partial(run_ncpdp_rationalization,      **common_kwargs)))
+        if config.has_guardrails():
+            tasks.append(("Guardrails", partial(run_guardrails_rationalization, **common_kwargs)))
+        if config.has_glue():
+            tasks.append(("Glue",       partial(run_glue_rationalization,       **common_kwargs)))
+        if config.has_edw():
+            tasks.append(("EDW",        partial(run_edw_rationalization,        **common_kwargs)))
+        if config.has_ancillary():
+            tasks.append(("Ancillary",  partial(run_ancillary_rationalization,  **common_kwargs)))
+
+        if not tasks:
+            print("   ⚠️  No rationalizable sources found in config — skipping Step 1")
+        elif len(tasks) == 1:
+            label, fn = tasks[0]
+            print(f"\n   {label} (single source — running inline)")
+            fn()
+        else:
+            print(f"\n   Running {len(tasks)} rationalizers in parallel: {', '.join(t[0] for t in tasks)}")
+            failures = []
+            with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+                futures = {ex.submit(fn): label for label, fn in tasks}
+                for fut in as_completed(futures):
+                    label = futures[fut]
+                    try:
+                        fut.result()
+                        print(f"   ✓ {label}: rationalization complete")
+                    except Exception as e:
+                        print(f"   ✗ {label}: FAILED — {e}")
+                        failures.append((label, e))
+            if failures:
+                print(f"\n   ⚠️  {len(failures)} rationalizer(s) failed — auto mode continues, but downstream steps may have gaps")
+
+    # ============================================================
+    # STEP 2: BUILD FOUNDATIONAL CDM
+    # ============================================================
+    if 2 in steps_to_run:
+        print(f"\n{'='*60}")
+        print(f"STEP 2: BUILD FOUNDATIONAL CDM (auto)")
+        print(f"{'='*60}")
+
+        cdm_outdir = base_outdir / "foundational_cdm"
+        cdm_outdir.mkdir(parents=True, exist_ok=True)
+
+        from src.cdm_builder.build_foundational_cdm import run_step3a
+        run_step3a(
+            config=config,
+            outdir=cdm_outdir,
+            llm=llm,
+            dry_run=False,
+            rationalized_dir=base_outdir / "rationalized",
+        )
+
+    # ============================================================
+    # STEP 3: CONSOLIDATION (auto-reject all)
+    # ============================================================
+    if 3 in steps_to_run:
+        print(f"\n{'='*60}")
+        print(f"STEP 3: CONSOLIDATION (auto — reject all)")
+        print(f"{'='*60}")
+
+        cdm_outdir = base_outdir / "foundational_cdm"
+        from src.refinement.refine_consolidation import run_consolidation_refinement
+        run_consolidation_refinement(
+            config=config,
+            cdm_file=None,
+            outdir=cdm_outdir,
+            llm=llm,
+            dry_run=False,
+            auto_reject_all=True,
+        )
+
+    # ============================================================
+    # STEP 4: PK/FK VALIDATION (auto-reject all)
+    # ============================================================
+    if 4 in steps_to_run:
+        print(f"\n{'='*60}")
+        print(f"STEP 4: PK/FK VALIDATION (auto — reject all)")
+        print(f"{'='*60}")
+
+        cdm_outdir = base_outdir / "foundational_cdm"
+        from src.refinement.refine_pk_fk_validation import run_pk_fk_validation
+        run_pk_fk_validation(
+            config=config,
+            cdm_file=None,
+            outdir=cdm_outdir,
+            llm=llm,
+            dry_run=False,
+            auto_reject_all=True,
+        )
+
+    # ============================================================
+    # STEP 5: BUILD FULL CDM + post-processing
+    # ============================================================
+    if 5 in steps_to_run:
+        print(f"\n{'='*60}")
+        print(f"STEP 5: BUILD FULL CDM (auto — Remap All, gap-thresh={gap_threshold:.0%})")
+        print(f"{'='*60}")
+
+        from src.cdm_full.build_full_cdm import run_build_full_cdm
+        # Determine source types from config so we can pass an explicit
+        # remap-all list rather than relying on the orchestrator's
+        # interactive default.
+        source_types = []
+        if config.has_fhir():       source_types.append("fhir")
+        if config.has_ncpdp():      source_types.append("ncpdp")
+        if config.has_guardrails(): source_types.append("guardrails")
+        if config.has_glue():       source_types.append("glue")
+        if config.has_edw():        source_types.append("edw")
+        if config.has_ancillary():
+            for anc in config.input_files.ancillary or []:
+                sid = anc.get("source_id")
+                if sid:
+                    source_types.append(sid)
+
+        run_build_full_cdm(
+            config=config,
+            cdm_file=None,
+            outdir=base_outdir,
+            llm=llm,
+            dry_run=False,
+            sources_to_map=source_types,    # remap all
+            skip_mapping=False,
+            generate_cdm=True,
+            run_gap_analysis=True,
+            match_workers=workers,
+            auto_threshold=gap_threshold,
+        )
+
+        # Step 5p — auto-run all post-processing steps non-interactively
+        print(f"\n{'='*60}")
+        print(f"STEP 5P: POST-PROCESSING (auto — run all)")
+        print(f"{'='*60}")
+
+        from src.cdm_full.run_postprocess import run_postprocessing
+        # `steps_to_run=None` defaults to "all registered post-process
+        # steps" inside run_postprocessing — see POSTPROCESS_STEPS list.
+        run_postprocessing(
+            config=config,
+            outdir=base_outdir,
+            llm=llm,
+            cdm_file=None,
+            steps_to_run=None,
+            dry_run=False,
+        )
+
+    # ============================================================
+    # STEP 6: GENERATE ARTIFACTS
+    # ============================================================
+    if 6 in steps_to_run:
+        print(f"\n{'='*60}")
+        print(f"STEP 6: GENERATE ARTIFACTS (auto — all)")
+        print(f"{'='*60}")
+
+        from src.artifacts.run_artifacts import run_artifact_generation, find_full_cdm
+        cdm_file = find_full_cdm(base_outdir, config.cdm.domain)
+        if not cdm_file:
+            print(f"   ⚠️  No Full CDM found — skipping artifacts")
+        else:
+            run_artifact_generation(
+                config=config,
+                outdir=base_outdir,
+                cdm_file=cdm_file,
+                generate_excel_flag=True,
+                generate_ddl_word_flag=False,    # off by default — Word generation is slower and rarely consumed
+                generate_ddl_sql_flag=True,
+                generate_lucidchart_flag=True,
+                dialect="sqlserver",
+                schema="dbo",
+                run_rule_consolidation_flag=True,
+                rule_consolidation_workers=workers,
+                llm=llm,
+                dry_run=False,
+            )
+
+    print(f"\n{'='*60}")
+    print(f"AUTO ORCHESTRATION COMPLETE")
+    print(f"{'='*60}\n")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="CDM Generation Orchestrator",
@@ -115,13 +412,56 @@ Examples:
   python cdm_orchestrator.py plan
   python cdm_orchestrator.py formulary
   python cdm_orchestrator.py "plan and benefit"
+
+  # Unattended end-to-end (kicks off Steps 1–6, returns when done)
+  python cdm_orchestrator.py plan --auto
+  python cdm_orchestrator.py plan --auto --workers 16 --gap-threshold 0.8
+  python cdm_orchestrator.py plan --auto --steps 5,6 --reject-all-gaps
         """
     )
-    
+
     ap.add_argument("cdm_name", help="CDM name (e.g., 'plan', 'formulary', 'Plan and Benefit')")
-    
+    ap.add_argument("--auto", action="store_true",
+                    help="Unattended end-to-end run with all defaults — no prompts.  "
+                         "Requires Step 0 (config) to have already been run.")
+    ap.add_argument("--model", default="gpt-5",
+                    help="Model key (auto mode only).  Default: gpt-5")
+    ap.add_argument("--workers", type=int, default=16,
+                    help="Concurrent LLM workers for per-entity matching and rule consolidation.  "
+                         "Auto mode only.  Default: 16")
+    ap.add_argument("--steps", default="1,2,3,4,5,6",
+                    help="Comma-separated step list (auto mode only).  Default: 1,2,3,4,5,6")
+    ap.add_argument("--gap-threshold", type=float, default=0.8,
+                    help="Confidence threshold for auto-approving gap-driven refinement "
+                         "recommendations (0.0–1.0).  Auto mode only.  Default: 0.8")
+    ap.add_argument("--reject-all-gaps", action="store_true",
+                    help="Reject every gap-refinement recommendation regardless of confidence.  "
+                         "Auto mode only.  Equivalent to --gap-threshold 1.01")
+
     args = ap.parse_args()
     cdm_name = args.cdm_name
+
+    # Auto mode short-circuits the interactive flow
+    if args.auto:
+        try:
+            steps = set()
+            for token in args.steps.split(","):
+                token = token.strip()
+                if token:
+                    steps.add(int(token))
+        except ValueError:
+            print(f"ERROR: --steps must be comma-separated integers, got: {args.steps}", file=sys.stderr)
+            sys.exit(1)
+
+        run_auto(
+            cdm_name=cdm_name,
+            model_key=args.model,
+            workers=args.workers,
+            steps_to_run=steps,
+            gap_threshold=args.gap_threshold,
+            reject_all_gaps=args.reject_all_gaps,
+        )
+        return
     
     try:
         print(f"\n{'='*60}")

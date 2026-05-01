@@ -223,10 +223,17 @@ def analyze_gaps(
 # PHASE 2: INTERACTIVE REVIEW
 # =============================================================================
 
-def review_recommendations(analysis: Dict) -> Dict:
+def review_recommendations(analysis: Dict, auto_threshold: Optional[float] = None) -> Dict:
     """Phase 2: Interactive user review of recommendations.
 
     Follows refine_consolidation.review_recommendations() pattern.
+
+    Args:
+        analysis: Output from analyze_gaps with `recommendations` list.
+        auto_threshold: If set (0.0–1.01), bypasses interactive review.
+            Recommendations with confidence >= threshold are auto-approved;
+            those below are auto-rejected.  Set 1.01 to reject everything.
+            Used by `auto` mode for unattended runs.
 
     Returns:
         Dict with approved_changes and rejected_changes
@@ -238,12 +245,33 @@ def review_recommendations(analysis: Dict) -> Dict:
         return {"approved_changes": [], "rejected_changes": []}
 
     print(f"\n   {'='*50}")
-    print(f"   PHASE 2: REVIEW RECOMMENDATIONS ({len(recs)} items)")
+    if auto_threshold is not None:
+        print(f"   PHASE 2: AUTO REVIEW ({len(recs)} items, threshold={auto_threshold:.0%})")
+    else:
+        print(f"   PHASE 2: REVIEW RECOMMENDATIONS ({len(recs)} items)")
     print(f"   {'='*50}")
 
     approved: List[Dict] = []
     rejected: List[Dict] = []
     choice = ""
+
+    # Auto-mode: confidence-based decision, no interactive prompts.
+    if auto_threshold is not None:
+        for rec in recs:
+            conf = rec.get("confidence", 0)
+            if conf >= auto_threshold:
+                approved.append(rec)
+            else:
+                rejected.append(rec)
+        print(f"\n   Auto-approved: {len(approved)} (confidence >= {auto_threshold:.0%})")
+        print(f"   Auto-rejected: {len(rejected)} (confidence < {auto_threshold:.0%})")
+        return {
+            "approved_changes": approved,
+            "rejected_changes": rejected,
+            "review_date": datetime.now().isoformat(),
+            "total_approved": len(approved),
+            "total_rejected": len(rejected),
+        }
 
     for i, rec in enumerate(recs, 1):
         rec_id = rec.get("id", f"REC-{i:03d}")
@@ -639,6 +667,7 @@ def run_ancillary_gap_refinement(
     outdir: Path,
     domain: str,
     dry_run: bool = False,
+    auto_threshold: Optional[float] = None,
 ) -> Tuple[Dict, bool]:
     """Refine CDM based on actual mapping gaps from ancillary sources.
 
@@ -646,7 +675,7 @@ def run_ancillary_gap_refinement(
 
     Flow:
       1. ANALYZE: AI reviews gap report + ancillary → recommendations
-      2. REVIEW: Interactive user review (A/R/S/Q)
+      2. REVIEW: Interactive user review (A/R/S/Q), or auto-threshold review
       3. APPLY: AI modifies CDM structure with approved changes
 
     Args:
@@ -658,6 +687,9 @@ def run_ancillary_gap_refinement(
         outdir: Output directory for saving results
         domain: CDM domain name
         dry_run: If True, save prompts only
+        auto_threshold: If set (0.0–1.01), bypasses interactive review.
+            Recommendations with confidence >= threshold are auto-approved.
+            Set 1.01 to reject everything.  Used by `auto` mode.
 
     Returns:
         (modified_cdm, was_modified) tuple
@@ -676,8 +708,8 @@ def run_ancillary_gap_refinement(
         print("\n   No refinement recommendations generated.")
         return cdm, False
 
-    # Phase 2: Review
-    review_result = review_recommendations(analysis)
+    # Phase 2: Review (interactive or auto-threshold based on caller)
+    review_result = review_recommendations(analysis, auto_threshold=auto_threshold)
 
     # Save full review record (approved + rejected + analysis)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

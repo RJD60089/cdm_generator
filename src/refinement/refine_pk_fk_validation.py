@@ -795,23 +795,26 @@ def run_pk_fk_validation(
     cdm_file: Optional[Path],
     outdir: Path,
     llm: Optional[LLMClient],
-    dry_run: bool = False
+    dry_run: bool = False,
+    auto_reject_all: bool = False,
 ) -> Optional[Dict]:
     """
     Main entry point for PK/FK validation refinement.
-    
+
     Orchestrates all three phases:
       Phase 1: Analyze → findings
       Phase 2: Review → approved fixes
       Phase 3: Apply → refined CDM
-    
+
     Args:
         config: App configuration
         cdm_file: Path to CDM (None to auto-find latest)
         outdir: Output directory
         llm: LLM client (None if dry_run)
         dry_run: If True, save prompts only
-        
+        auto_reject_all: If True, bypass interactive review and reject every
+            finding (CDM unchanged).  Used by `auto` mode for first-look CDM.
+
     Returns:
         Refined CDM dict (None if dry_run or no changes)
     """
@@ -850,10 +853,14 @@ def run_pk_fk_validation(
     
     if findings is None:
         return None
-    
-    # Phase 2: Review
+
+    # Phase 2: Review (or auto-reject in auto mode)
+    if auto_reject_all:
+        finding_count = len(findings.get('validation_findings', []))
+        print(f"\n   AUTO MODE: rejecting all {finding_count} PK/FK finding(s)")
+        return cdm
     approved = review_findings(findings)
-    
+
     if not approved.get('approved_fixes'):
         print(f"\n   No fixes approved. CDM unchanged.")
         return cdm

@@ -67,6 +67,7 @@ def run_build_full_cdm(
     generate_cdm: bool = True,
     run_gap_analysis: bool = True,
     match_workers: int = 1,
+    auto_threshold: Optional[float] = None,
 ) -> Optional[Dict]:
     """
     Main entry point for Full CDM generation (Step 5).
@@ -315,6 +316,7 @@ def run_build_full_cdm(
                 outdir=full_cdm_dir,
                 domain=config.cdm.domain,
                 dry_run=dry_run,
+                auto_threshold=auto_threshold,
             )
 
             if was_modified:

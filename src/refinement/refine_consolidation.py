@@ -757,23 +757,28 @@ def run_consolidation_refinement(
     cdm_file: Optional[Path],
     outdir: Path,
     llm: Optional[LLMClient],
-    dry_run: bool = False
+    dry_run: bool = False,
+    auto_reject_all: bool = False,
 ) -> Optional[Dict]:
     """
     Main entry point for consolidation refinement.
-    
+
     Orchestrates all three phases:
       Phase 1: Analyze → recommendations
       Phase 2: Review → approved changes
       Phase 3: Apply → refined CDM
-    
+
     Args:
         config: App configuration
         cdm_file: Path to foundational CDM (None to auto-find latest)
         outdir: Output directory
         llm: LLM client (None if dry_run)
         dry_run: If True, save prompts only
-        
+        auto_reject_all: If True, bypass interactive review and reject every
+            recommendation (CDM unchanged).  Used by `auto` mode where the
+            first-look CDM is built without applying consolidation merges;
+            users can refine interactively in a later run.
+
     Returns:
         Refined CDM dict (None if dry_run or no changes)
     """
@@ -820,10 +825,14 @@ def run_consolidation_refinement(
     
     if recommendations is None:
         return None
-    
-    # Phase 2: Review
+
+    # Phase 2: Review (or auto-reject in auto mode)
+    if auto_reject_all:
+        rec_count = len(recommendations.get('consolidation_recommendations', []))
+        print(f"\n   AUTO MODE: rejecting all {rec_count} consolidation recommendation(s)")
+        return cdm
     approved = review_recommendations(recommendations)
-    
+
     if not approved.get('approved_changes'):
         print(f"\n   No changes approved. CDM unchanged.")
         return cdm

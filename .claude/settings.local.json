@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3)",
+      "Bash(find /Projects/cdm_generator -name \"*.py\" -type f -exec grep -l \"unmapped\\\\|gap\" {} \\\\;)",
+      "Bash(find . -name \"*.py\" -type f -exec grep -l \"unmapped\\\\|disposition\" {} \\\\;)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git fetch *)",
+      "Bash(git rev-list *)"
+    ]
+  }
+}
