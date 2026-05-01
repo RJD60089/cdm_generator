@@ -285,79 +285,80 @@ def run_build_full_cdm(
             print(f"   Refiner-source unmapped fields: {len(ancillary_unmapped)}")
             print(f"   Refiner sources: {', '.join(refiner_sources_in_pipeline)}")
 
-            from src.config.config_gen_core import prompt_user_choice
-            if prompt_user_choice("   Run CDM refinement based on these gaps?", default="Y"):
+            # Refinement runs unconditionally when the data-level conditions
+            # above are satisfied.  The config's refiner-mode declaration is
+            # the user's intent statement that this source should refine the
+            # CDM; re-prompting "Run refinement?" at this point asks the user
+            # to re-confirm a decision they already made at config time.
 
-                # Merge rationalized data ONLY from refiner-mode ancillary
-                # sources — mapper sources are excluded so their entities
-                # cannot influence CDM refinement.
-                merged_ancillary_data = {"entities": []}
-                for anc_src in refiner_sources_in_pipeline:
-                    anc_file = discovered_sources.get(anc_src)
-                    if anc_file:
-                        with open(anc_file, 'r', encoding='utf-8') as f:
-                            anc_data = json.load(f)
-                        merged_ancillary_data["entities"].extend(
-                            anc_data.get("entities", [])
-                        )
+            # Merge rationalized data ONLY from refiner-mode ancillary
+            # sources — mapper sources are excluded so their entities
+            # cannot influence CDM refinement.
+            merged_ancillary_data = {"entities": []}
+            for anc_src in refiner_sources_in_pipeline:
+                anc_file = discovered_sources.get(anc_src)
+                if anc_file:
+                    with open(anc_file, 'r', encoding='utf-8') as f:
+                        anc_data = json.load(f)
+                    merged_ancillary_data["entities"].extend(
+                        anc_data.get("entities", [])
+                    )
 
-                from src.cdm_full.refine_from_gaps import run_ancillary_gap_refinement
+            from src.cdm_full.refine_from_gaps import run_ancillary_gap_refinement
 
-                refined_cdm, was_modified = run_ancillary_gap_refinement(
-                    cdm=full_cdm,
-                    gap_report=gap_data,
-                    ancillary_data=merged_ancillary_data,
-                    config=config,
-                    llm=llm,
-                    outdir=full_cdm_dir,
-                    domain=config.cdm.domain,
-                    dry_run=dry_run,
+            refined_cdm, was_modified = run_ancillary_gap_refinement(
+                cdm=full_cdm,
+                gap_report=gap_data,
+                ancillary_data=merged_ancillary_data,
+                config=config,
+                llm=llm,
+                outdir=full_cdm_dir,
+                domain=config.cdm.domain,
+                dry_run=dry_run,
+            )
+
+            if was_modified:
+                full_cdm = refined_cdm
+
+                # Re-map all ancillary sources against modified CDM
+                print(f"\n   Re-mapping ancillary sources against modified CDM...")
+                re_init_cdm = initialize_full_cdm(
+                    full_cdm, source_types, domain_description
                 )
 
-                if was_modified:
-                    full_cdm = refined_cdm
-
-                    # Re-map all ancillary sources against modified CDM
-                    print(f"\n   Re-mapping ancillary sources against modified CDM...")
-                    re_init_cdm = initialize_full_cdm(
-                        full_cdm, source_types, domain_description
+                for anc_source in ancillary_source_types:
+                    anc_match = generate_match_file(
+                        config=config,
+                        source_type=anc_source,
+                        rationalized_file=discovered_sources[anc_source],
+                        full_cdm=re_init_cdm,
+                        llm=llm,
+                        full_cdm_dir=full_cdm_dir,
+                        domain_description=domain_description,
+                        dry_run=dry_run,
+                        max_workers=match_workers,
                     )
+                    if anc_match:
+                        match_files[anc_source] = anc_match
 
-                    for anc_source in ancillary_source_types:
-                        anc_match = generate_match_file(
-                            config=config,
-                            source_type=anc_source,
-                            rationalized_file=discovered_sources[anc_source],
-                            full_cdm=re_init_cdm,
-                            llm=llm,
-                            full_cdm_dir=full_cdm_dir,
-                            domain_description=domain_description,
-                            dry_run=dry_run,
-                            max_workers=match_workers,
-                        )
-                        if anc_match:
-                            match_files[anc_source] = anc_match
+                # Re-apply ALL match files
+                full_cdm, application_report = apply_match_files(
+                    re_init_cdm, match_files, source_entities_lookup
+                )
 
-                    # Re-apply ALL match files
-                    full_cdm, application_report = apply_match_files(
-                        re_init_cdm, match_files, source_entities_lookup
-                    )
+                # Re-generate gap report
+                gap_file = generate_gap_report(
+                    application_report, full_cdm_dir, config.cdm.domain
+                )
 
-                    # Re-generate gap report
-                    gap_file = generate_gap_report(
-                        application_report, full_cdm_dir, config.cdm.domain
-                    )
-
-                    # Report improvement
-                    with open(gap_file, 'r', encoding='utf-8') as f:
-                        new_gaps = json.load(f)
-                    new_unmapped = len([
-                        u for u in new_gaps.get("unmapped_fields", [])
-                        if u.get("source_type", "").lower().startswith("ancillary")
-                    ])
-                    print(f"\n   Ancillary unmapped: {len(ancillary_unmapped)} -> {new_unmapped}")
-            else:
-                print(f"   Skipping ancillary refinement.")
+                # Report improvement
+                with open(gap_file, 'r', encoding='utf-8') as f:
+                    new_gaps = json.load(f)
+                new_unmapped = len([
+                    u for u in new_gaps.get("unmapped_fields", [])
+                    if u.get("source_type", "").lower().startswith("ancillary")
+                ])
+                print(f"\n   Ancillary unmapped: {len(ancillary_unmapped)} -> {new_unmapped}")
         else:
             print(f"\n   No unmapped ancillary fields — refiner gate not triggered.")
 
