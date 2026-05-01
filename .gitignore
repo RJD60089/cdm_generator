@@ -25,3 +25,5 @@ input
 
 # Editors
 .vscode/
+# Claude Code worktree-local settings
+.claude/
