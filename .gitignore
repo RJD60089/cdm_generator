@@ -24,4 +24,6 @@ input/business/
 input
 
 # Editors
-.vscode/.claude/
+.vscode/
+# Claude Code worktree-local settings
+.claude/
