@@ -264,7 +264,7 @@ def run_auto(
         print(f"STEP 2: BUILD FOUNDATIONAL CDM (auto)")
         print(f"{'='*60}")
 
-        cdm_outdir = base_outdir / "foundational_cdm"
+        cdm_outdir = base_outdir / "cdm"
         cdm_outdir.mkdir(parents=True, exist_ok=True)
 
         from src.cdm_builder.build_foundational_cdm import run_step3a
@@ -284,7 +284,7 @@ def run_auto(
         print(f"STEP 3: CONSOLIDATION (auto — reject all)")
         print(f"{'='*60}")
 
-        cdm_outdir = base_outdir / "foundational_cdm"
+        cdm_outdir = base_outdir / "cdm"
         from src.refinement.refine_consolidation import run_consolidation_refinement
         run_consolidation_refinement(
             config=config,
@@ -303,7 +303,7 @@ def run_auto(
         print(f"STEP 4: PK/FK VALIDATION (auto — reject all)")
         print(f"{'='*60}")
 
-        cdm_outdir = base_outdir / "foundational_cdm"
+        cdm_outdir = base_outdir / "cdm"
         from src.refinement.refine_pk_fk_validation import run_pk_fk_validation
         run_pk_fk_validation(
             config=config,
