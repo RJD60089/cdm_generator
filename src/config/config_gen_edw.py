@@ -55,6 +55,18 @@ class EDWConfigGenerator(ConfigGeneratorBase):
             return summaries
 
         for catalog_file in sorted(self.catalog_dir.glob("edw_*.json")):
+            # Skip the source-to-target file variant.  Each EDW entity has
+            # up to two files in the catalog directory:
+            #   edw_<id>.json                       (catalog — table layout)
+            #   edw_<id> - source to target.json    (s2t — full lineage)
+            # Only the canonical catalog filename should appear in the
+            # entity selection list; the rationalizer's _load_entity_file()
+            # prefers the s2t variant at load time when both exist.  Without
+            # this skip, every entity is enumerated TWICE (once with a
+            # mangled "<ID> - SOURCE TO TARGET" entity_id) and the LLM
+            # selects both as if they were distinct entities.
+            if catalog_file.stem.lower().endswith(" - source to target"):
+                continue
             try:
                 wrapper = json.loads(catalog_file.read_text(encoding="utf-8"))
                 entity = wrapper.get("entity", wrapper)
