@@ -125,20 +125,21 @@ class ConfigGenerator(ConfigGeneratorBase):
                     ncpdp_result = self.ncpdp_gen.validate_codes(ncpdp_result)
 
             # Guardrails Tab Triage — AI decides which sheets to include per file.
-            # Runs unconditionally when guardrails files exist (in config or on
-            # disk). Triage is correctness-critical: without it, anti-list tabs
-            # (items deliberately excluded from the CDM), FHIR reference tabs,
-            # glossaries, and templates all get sent to the rationalizer.
-            existing_gr = (source_config.get('input_files') or {}).get('guardrails') or []
-            if guardrails_files or existing_gr:
+            # Per-step selector parallels FHIR / NCPDP / Glue / EDW / Ancillary.
+            # When the user says Y, triage runs unconditionally on every
+            # guardrails file (no separate sub-prompt) — there is no value in
+            # processing guardrails without triage, since untriaged runs
+            # rationalize anti-list tabs, FHIR reference tabs, glossaries, and
+            # templates that should be excluded.
+            if prompt_user_choice("\n   Run Guardrails tab triage (per-file include/exclude)?", default="Y"):
                 # First-pass seeding: when source_config has no guardrails
                 # listed yet (e.g., a freshly created config), populate the
                 # in-memory config with the auto-discovered file list so
-                # triage can see them.
+                # triage has something to work on rather than no-op'ing.
+                existing_gr = (source_config.get('input_files') or {}).get('guardrails') or []
                 if guardrails_files and not existing_gr:
                     source_config.setdefault('input_files', {})['guardrails'] = list(guardrails_files)
-                    print(f"\n   ℹ️  Seeded {len(guardrails_files)} auto-discovered guardrail file(s) into config")
-                print(f"\n   Running Guardrails tab triage (per-file include/exclude)...")
+                    print(f"   ℹ️  Seeded {len(guardrails_files)} auto-discovered guardrail file(s) into config")
                 guardrails_result = self.guardrails_gen.run_analysis(source_config, dry_run)
 
             # Glue Analysis

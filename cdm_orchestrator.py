@@ -303,83 +303,71 @@ Examples:
             if not any([process_fhir, process_ncpdp, process_guardrails, process_glue, process_edw, process_ancillary]):
                 print("  ⚠️  No sources selected for processing")
             
-            # Step 1a: FHIR
+            # Step 1a-f: Run each enabled rationalizer.  When more than
+            # one source is selected, rationalizers run concurrently —
+            # they're independent (each writes to its own output file)
+            # and the LLM calls are I/O-bound so the GIL doesn't block.
+            # When only one source is selected, runs inline (no thread
+            # overhead).  Internal prints from each rationalizer will
+            # interleave under parallel execution; the per-task start
+            # and complete markers below provide coarse progress.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from functools import partial
+            from src.rationalizers import (
+                run_fhir_rationalization,
+                run_ncpdp_rationalization,
+                run_guardrails_rationalization,
+                run_glue_rationalization,
+                run_edw_rationalization,
+            )
+            from src.rationalizers.rationalize_ancillary import run_ancillary_rationalization
+
+            common_kwargs = dict(
+                config=config,
+                outdir=rationalized_outdir,
+                llm=llm,
+                dry_run=dry_run,
+                config_path=str(config_file),
+            )
+
+            tasks = []  # list of (label, callable)
             if process_fhir:
-                print(f"\n=== Step 1a: FHIR Rationalization ===")
-                from src.rationalizers import run_fhir_rationalization
-                
-                run_fhir_rationalization(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm,
-                    dry_run=dry_run,
-                    config_path=str(config_file)
-                )
-            
-            # Step 1b: NCPDP
+                tasks.append(("Step 1a: FHIR",       partial(run_fhir_rationalization,       **common_kwargs)))
             if process_ncpdp:
-                print(f"\n=== Step 1b: NCPDP Rationalization ===")
-                from src.rationalizers import run_ncpdp_rationalization
-                
-                run_ncpdp_rationalization(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm,
-                    dry_run=dry_run,
-                    config_path=str(config_file)
-                )
-            
-            # Step 1c: Guardrails
+                tasks.append(("Step 1b: NCPDP",      partial(run_ncpdp_rationalization,      **common_kwargs)))
             if process_guardrails:
-                print(f"\n=== Step 1c: Guardrails Rationalization ===")
-                from src.rationalizers import run_guardrails_rationalization
-                
-                run_guardrails_rationalization(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm,
-                    dry_run=dry_run,
-                    config_path=str(config_file)
-                )
-            
-            # Step 1d: Glue
+                tasks.append(("Step 1c: Guardrails", partial(run_guardrails_rationalization, **common_kwargs)))
             if process_glue:
-                print(f"\n=== Step 1d: Glue Rationalization ===")
-                from src.rationalizers import run_glue_rationalization
-                
-                run_glue_rationalization(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm,
-                    dry_run=dry_run,
-                    config_path=str(config_file)
-                )
-
-            # Step 1e: EDW
+                tasks.append(("Step 1d: Glue",       partial(run_glue_rationalization,       **common_kwargs)))
             if process_edw:
-                print(f"\n=== Step 1e: EDW Rationalization ===")
-                from src.rationalizers import run_edw_rationalization
-
-                run_edw_rationalization(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm,
-                    dry_run=dry_run,
-                    config_path=str(config_file)
-                )
-
-            # Step 1f: Ancillary
+                tasks.append(("Step 1e: EDW",        partial(run_edw_rationalization,        **common_kwargs)))
             if process_ancillary:
-                print(f"\n=== Step 1f: Ancillary Rationalization ===")
-                from src.rationalizers.rationalize_ancillary import run_ancillary_rationalization
+                tasks.append(("Step 1f: Ancillary",  partial(run_ancillary_rationalization,  **common_kwargs)))
 
-                run_ancillary_rationalization(
-                    config=config,
-                    outdir=rationalized_outdir,
-                    llm=llm,
-                    dry_run=dry_run,
-                    config_path=str(config_file)
-                )
+            if len(tasks) == 1:
+                # Single source — run inline, preserve the original output shape.
+                label, fn = tasks[0]
+                print(f"\n=== {label} Rationalization ===")
+                fn()
+            elif len(tasks) > 1:
+                print(f"\n=== Running {len(tasks)} rationalizers in parallel ===")
+                print(f"   Output from individual rationalizers will interleave.")
+                print(f"   Each writes its own output file; failures do not cascade.")
+                failures = []
+                with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+                    futures = {ex.submit(fn): label for label, fn in tasks}
+                    for fut in as_completed(futures):
+                        label = futures[fut]
+                        try:
+                            fut.result()
+                            print(f"\n=== ✓ {label}: rationalization complete ===")
+                        except Exception as e:
+                            print(f"\n=== ✗ {label}: FAILED — {e} ===")
+                            failures.append((label, e))
+                if failures:
+                    print(f"\n   ⚠️  {len(failures)} rationalizer(s) failed:")
+                    for label, e in failures:
+                        print(f"      - {label}: {e}")
 
             print(f"\n{'='*60}")
             print(f"✓ STEP 1 COMPLETE")
