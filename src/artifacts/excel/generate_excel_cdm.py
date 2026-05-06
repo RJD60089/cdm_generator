@@ -34,6 +34,7 @@ from src.artifacts.excel.tab_lab import (
     create_entities_lab_tab,
 )
 from src.artifacts.excel.tab_mapping import create_mapping_tab
+from src.artifacts.excel.tab_collibra import create_collibra_tab
 
 
 def generate_excel_cdm(
@@ -163,6 +164,12 @@ def generate_excel_cdm(
     # 13. ERD
     print(f"      - ERD")
     create_erd_tab(wb, erd_url)
+
+    # 14. Collibra — Collibra-import-shaped sheet, last so the team can
+    # detach it as the last sheet for ingestion without disturbing the
+    # rest of the workbook.
+    print(f"      - Collibra")
+    create_collibra_tab(wb, extractor, config, outdir=domain_outdir)
 
     # Save workbook
     output_path.parent.mkdir(parents=True, exist_ok=True)
