@@ -42,19 +42,6 @@ def _find_rationalized_ancillary_files(outdir: Path, domain: str) -> List[Path]:
     return matches
 
 
-def _find_latest_excel(outdir: Path, domain: str) -> Optional[Path]:
-    """Find the latest Excel workbook in outdir/artifacts/."""
-    artifacts_dir = outdir / "artifacts"
-    if not artifacts_dir.exists():
-        return None
-    domain_safe = domain.lower().replace(" ", "_")
-    matches = sorted(
-        artifacts_dir.glob(f"{domain_safe}_CDM_*.xlsx"),
-        reverse=True,
-    )
-    return matches[0] if matches else None
-
-
 # ---------------------------------------------------------------------------
 # Build ancillary lookup
 # ---------------------------------------------------------------------------
@@ -207,85 +194,9 @@ def run_ancillary_postprocess(
         if shown >= 5:
             break
 
-    # Update Excel workbook in-place
-    if outdir:
-        _update_excel_data_dictionary(cdm, outdir, domain)
+    print(
+        f"\n   ℹ️  Re-run Step 7 (Generate Artifacts) to rebuild the Excel "
+        f"workbook with ancillary source columns."
+    )
 
     return cdm
-
-
-# ---------------------------------------------------------------------------
-# In-place Excel Data_Dictionary tab replacement
-# ---------------------------------------------------------------------------
-
-def _update_excel_data_dictionary(
-    cdm: Dict[str, Any],
-    outdir: Path,
-    domain: str,
-) -> None:
-    """
-    Replace the Data_Dictionary sheet in the latest Excel workbook with a
-    rebuilt version that includes ancillary source columns.
-
-    Follows the exact same pattern as postprocess_field_codes.py lines 239-309.
-    """
-    try:
-        from openpyxl import load_workbook
-    except ImportError:
-        print(f"   openpyxl not available — skipping Excel update")
-        return
-
-    xlsx_path = _find_latest_excel(outdir, domain)
-    if not xlsx_path:
-        print(f"\n   No Excel workbook found in {outdir / 'artifacts'} — skipping tab update")
-        print(f"       Run Step 7 first, then re-run this post-process step.")
-        return
-
-    print(f"\n   Updating Excel workbook: {xlsx_path.name}")
-
-    wb = load_workbook(xlsx_path)
-    sheet_names = wb.sheetnames
-
-    if "Data_Dictionary" not in sheet_names:
-        print(f"   Data_Dictionary tab not found in workbook — skipping")
-        wb.close()
-        return
-
-    tab_position = sheet_names.index("Data_Dictionary")
-
-    # Remove existing sheet
-    del wb["Data_Dictionary"]
-
-    try:
-        from src.artifacts.common.cdm_extractor import CDMExtractor
-        from src.artifacts.excel.tab_data_dictionary import create_data_dictionary_tab
-
-        import tempfile
-        import json as _json
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, encoding="utf-8"
-        ) as tmp:
-            _json.dump(cdm, tmp)
-            tmp_path = Path(tmp.name)
-
-        extractor = CDMExtractor(cdm_path=tmp_path)
-        # outdir + domain let the tab look up rationalized JSON for
-        # ancillary columns to render original schema.table.column refs.
-        create_data_dictionary_tab(wb, extractor, outdir=outdir, cdm_name=domain)
-        tmp_path.unlink(missing_ok=True)
-
-        wb.move_sheet("Data_Dictionary", offset=tab_position - len(wb.sheetnames) + 1)
-
-        wb.save(xlsx_path)
-        print(f"   Data_Dictionary tab replaced at position {tab_position + 1}")
-        print(f"     Ancillary Source column added")
-
-    except Exception as e:
-        print(f"   Excel update failed: {e}")
-        print(f"       Re-run Step 7 to generate a fresh workbook.")
-    finally:
-        try:
-            wb.close()
-        except Exception:
-            pass

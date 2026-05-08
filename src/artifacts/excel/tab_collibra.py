@@ -24,6 +24,11 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from src.artifacts.common.cdm_extractor import CDMExtractor
+from src.artifacts.common.lineage_render import (
+    EDW_COLUMN_PREFERENCE,
+    EDW_TABLE_PREFERENCE,
+    first_present,
+)
 from src.artifacts.common.schema_resolver import SchemaResolver, ancillary_attribute_index
 from src.artifacts.common.styles import ExcelStyles
 from src.config.config_parser import AppConfig
@@ -87,11 +92,18 @@ def _lineage_entries(
     source_key: str,
     ancillary_index: Optional[Dict[Tuple[str, str], List[Dict[str, str]]]] = None,
 ) -> List[Dict[str, Any]]:
+    """
+    Mirror of tab_mapping._lineage_entries — kept local to avoid coupling
+    the two tab modules through a private symbol. EDW preference and the
+    `first_present` helper are imported from src.artifacts.common.lineage_render
+    so the two tabs stay in sync without sharing a private function.
+    """
     entries = attr.source_lineage.get(source_key, []) or []
     if isinstance(entries, dict):
         entries = [entries]
 
-    use_index = ancillary_index is not None and source_key.startswith("ancillary")
+    use_ancillary_index = ancillary_index is not None and source_key.startswith("ancillary")
+    is_edw = source_key.lower() == "edw"
 
     out: List[Dict[str, Any]] = []
     for e in entries:
@@ -100,7 +112,7 @@ def _lineage_entries(
         rationalized_ent = e.get("source_entity", "") or ""
         rationalized_attr = e.get("source_attribute", "") or ""
 
-        if use_index:
+        if use_ancillary_index:
             originals = ancillary_index.get(
                 (rationalized_ent.lower(), rationalized_attr.lower()),
                 [],
@@ -113,6 +125,17 @@ def _lineage_entries(
                         "schema": o.get("schema", ""),
                     })
                 continue
+
+        if is_edw:
+            edw_table  = first_present(e, EDW_TABLE_PREFERENCE)  or rationalized_ent
+            edw_column = first_present(e, EDW_COLUMN_PREFERENCE) or rationalized_attr
+            if edw_table or edw_column:
+                out.append({
+                    "table":  edw_table,
+                    "column": edw_column,
+                    "schema": "",
+                })
+            continue
 
         if rationalized_ent or rationalized_attr:
             out.append({

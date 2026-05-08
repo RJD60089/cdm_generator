@@ -31,6 +31,11 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from src.artifacts.common.cdm_extractor import CDMExtractor
+from src.artifacts.common.lineage_render import (
+    EDW_COLUMN_PREFERENCE,
+    EDW_TABLE_PREFERENCE,
+    first_present,
+)
 from src.artifacts.common.schema_resolver import SchemaResolver, ancillary_attribute_index
 from src.artifacts.common.styles import ExcelStyles
 from src.config.config_parser import AppConfig
@@ -126,25 +131,33 @@ def _lineage_entries(
           source_lineage entry values, kept so callers can still report
           which lineage row produced the mapping if needed
 
-    For ancillary sources, an attribute index (from rationalized JSON's
-    per-attribute ``source_attribute`` list) is consulted to recover the
-    original ``schema.table.column`` references — the rationalizer
-    renames entities to business-friendly names but keeps original
-    refs stashed elsewhere; this routine reads those.
+    Resolution order, per source key:
 
-    For all other sources (EDW, FHIR, NCPDP, ...), behaviour is
-    unchanged: the lineage's ``source_entity`` / ``source_attribute``
-    are used directly and the schema is left empty for SchemaResolver
-    to fill via the per-source schema lookup.
+    EDW: when ``postprocess_edw_lineage`` has run, lineage entries carry
+        real SQL identifiers (`source_table`/`ni_table`/`np_table` and
+        the `_column` equivalents). The `_EDW_*_PREFERENCE` tuples above
+        select which layer is rendered. Falls back to the rationalized
+        business-friendly names when the enrichment hasn't run.
+
+    Ancillary: an attribute index (from rationalized JSON's per-attribute
+        ``source_attribute`` list) recovers the original
+        ``schema.table.column`` references — the rationalizer renames
+        entities to business-friendly names but keeps original refs
+        stashed elsewhere; this routine reads those.
+
+    Other sources (FHIR, NCPDP, ...): the lineage's ``source_entity`` /
+        ``source_attribute`` are used directly and the schema is left
+        empty for SchemaResolver to fill via the per-source schema lookup.
     """
     entries = attr.source_lineage.get(source_key, []) or []
     if isinstance(entries, dict):
         entries = [entries]
 
-    use_index = (
+    use_ancillary_index = (
         ancillary_index is not None
         and source_key.startswith("ancillary")
     )
+    is_edw = source_key.lower() == "edw"
 
     out: List[Dict[str, Any]] = []
     for e in entries:
@@ -153,7 +166,7 @@ def _lineage_entries(
         rationalized_ent = e.get("source_entity", "") or ""
         rationalized_attr = e.get("source_attribute", "") or ""
 
-        if use_index:
+        if use_ancillary_index:
             originals = ancillary_index.get(
                 (rationalized_ent.lower(), rationalized_attr.lower()),
                 [],
@@ -168,6 +181,20 @@ def _lineage_entries(
                         "rationalized_attribute": rationalized_attr,
                     })
                 continue
+
+        if is_edw:
+            # Prefer enriched SQL identifiers, fall back to rationalized.
+            edw_table  = first_present(e, EDW_TABLE_PREFERENCE)  or rationalized_ent
+            edw_column = first_present(e, EDW_COLUMN_PREFERENCE) or rationalized_attr
+            if edw_table or edw_column:
+                out.append({
+                    "table":  edw_table,
+                    "column": edw_column,
+                    "schema": "",
+                    "rationalized_entity":    rationalized_ent,
+                    "rationalized_attribute": rationalized_attr,
+                })
+            continue
 
         # Default / fallback: use rationalized values directly, no schema
         if rationalized_ent or rationalized_attr:
