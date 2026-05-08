@@ -16,6 +16,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 from src.core.llm_client import LLMClient
+from src.cdm_full.match_generator import build_compact_catalog
 
 
 @dataclass
@@ -139,8 +140,13 @@ def classify_with_ai(
 ) -> List[SensitivityResult]:
     """Use AI to identify sensitive attributes using full CDM context."""
     
+    # Use the compact catalog (entity/attr names + descriptions + types only)
+    # rather than the full CDM. Strips source_lineage and rule blocks that
+    # are not needed for PII/PHI decisions and would otherwise blow past
+    # the model's input-token limit on large domains.
+    compact = build_compact_catalog(cdm)
     prompt = SENSITIVITY_PROMPT.format(
-        cdm_json=json.dumps(cdm, indent=2, default=str)
+        cdm_json=json.dumps(compact, indent=2, default=str)
     )
     
     # Match CDE pattern: no system message, just user prompt

@@ -54,6 +54,18 @@ def build_compact_catalog(full_cdm: Dict) -> Dict:
     """
     Build compact CDM catalog for AI context (minimizes tokens).
 
+    Strips heavy fields (source_lineage, business_rules, validation_rules,
+    full descriptions) while keeping enough for semantic decisions:
+    entity name + description, attribute name + coarse type + pk flag +
+    short description.
+
+    Pass-through fields (only included when present on the attribute):
+        is_pii, is_phi, required
+
+    Including these lets post-process steps that depend on prior
+    annotations (e.g. CDE selection reads PII/PHI flags set by the
+    sensitivity step) reuse the same compact view.
+
     Args:
         full_cdm: Full CDM dict
 
@@ -92,6 +104,10 @@ def build_compact_catalog(full_cdm: Dict) -> Dict:
                 "pk": attr.get("pk", False),
                 "desc": (attr.get("description") or "")[:150]
             }
+            # Pass-through annotations from prior post-process steps when present.
+            for k in ("is_pii", "is_phi", "required"):
+                if k in attr:
+                    compact_attr[k] = attr[k]
             compact_entity["attributes"].append(compact_attr)
 
         catalog["entities"].append(compact_entity)

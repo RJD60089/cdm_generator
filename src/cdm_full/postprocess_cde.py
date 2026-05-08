@@ -23,6 +23,7 @@ from typing import Dict, Any, List, Optional
 
 from src.config.config_parser import AppConfig
 from src.core.llm_client import LLMClient
+from src.cdm_full.match_generator import build_compact_catalog
 
 
 # =============================================================================
@@ -251,9 +252,14 @@ def identify_cdes(
         List of validated CDE dicts with entity, attribute, cde_category,
         and justification.
     """
-    # Build prompt with full CDM
+    # Use the compact catalog (entity/attr names + descriptions + types,
+    # plus is_pii / is_phi when set by the sensitivity step) rather than
+    # the full CDM. Strips source_lineage and rule blocks that are not
+    # needed for CDE selection and would otherwise blow past the model's
+    # input-token limit on large domains.
+    compact = build_compact_catalog(cdm)
     prompt = CDE_IDENTIFICATION_PROMPT.format(
-        cdm_json=json.dumps(cdm, indent=2, default=str)
+        cdm_json=json.dumps(compact, indent=2, default=str)
     )
 
     if dry_run:
