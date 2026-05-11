@@ -307,9 +307,16 @@ def run_build_full_cdm(
 
             from src.cdm_full.refine_from_gaps import run_ancillary_gap_refinement
 
+            # Pass a filtered view of the gap report — only refiner-mode
+            # unmapped fields reach the analysis LLM.  Mapper-mode gaps stay
+            # in the on-disk gap report for artifact visibility, but must
+            # not drive CDM modifications.
+            filtered_gap_report = dict(gap_data)
+            filtered_gap_report["unmapped_fields"] = ancillary_unmapped
+
             refined_cdm, was_modified = run_ancillary_gap_refinement(
                 cdm=full_cdm,
-                gap_report=gap_data,
+                gap_report=filtered_gap_report,
                 ancillary_data=merged_ancillary_data,
                 config=config,
                 llm=llm,
