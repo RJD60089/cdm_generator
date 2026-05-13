@@ -176,7 +176,11 @@ class ConfigGenerator(ConfigGeneratorBase):
             new_ancillaries=new_ancillaries,
             guardrails_result=guardrails_result,
         )
-        
+
+        # Step 4b: Review processing modes (interactive; skippable)
+        if prompt_user_choice("\n   Review processing modes for all sources?", default="N"):
+            updated_config = self._review_processing_modes(updated_config)
+
         # Step 5: Save with new timestamp
         filepath = self.save_config(updated_config)
         
@@ -330,6 +334,97 @@ class ConfigGenerator(ConfigGeneratorBase):
                 "source_id":       source_id,
             })
         return new_entries
+
+    def _review_processing_modes(self, config: Dict) -> Dict:
+        """Interactive: show every configured source's processing_mode and
+        let the user change any of them.
+
+        Non-ancillary modes live in ``config["processing_modes"][slug]``.
+        Ancillary modes live per-entry as ``entry["processing_mode"]`` on
+        each ``config["input_files"]["ancillary"]`` element.
+
+        Enforces the singleton-foundational invariant — attempting to
+        flip a second source to ``foundational`` is rejected with a
+        warning; the existing value is kept.
+
+        Returns the (in-place modified) config.
+        """
+        input_files = config.get("input_files") or {}
+
+        def _has_section(slug: str) -> bool:
+            if slug == "fhir":
+                return bool(input_files.get("fhir_igs"))
+            if slug == "ncpdp":
+                return bool(
+                    input_files.get("ncpdp_general_standards")
+                    or input_files.get("ncpdp_script_standards")
+                )
+            return bool(input_files.get(slug))
+
+        pm: Dict[str, str] = config.setdefault("processing_modes", {})
+        ancillary_entries: List[Dict] = input_files.get("ancillary") or []
+
+        # Build a flat review list.  Tuples are (kind, label, current_mode).
+        rows: List[tuple] = []
+        for slug in ("fhir", "ncpdp", "guardrails", "glue", "edw"):
+            if _has_section(slug):
+                rows.append(("non_ancillary", slug, pm.get(slug, "refiner")))
+        for entry in ancillary_entries:
+            sid = entry.get("source_id") or entry.get("file") or "<unnamed>"
+            rows.append(("ancillary", sid, entry.get("processing_mode") or "refiner"))
+
+        if not rows:
+            print(f"\n   (no sources configured — nothing to review)")
+            return config
+
+        # Mode shortcut table
+        _alias = {
+            "f": "foundational", "foundational": "foundational",
+            "d": "driver",       "driver":       "driver",
+            "r": "refiner",      "refiner":      "refiner",
+            "m": "mapper",       "mapper":       "mapper",
+        }
+
+        print(f"\n   Review processing modes (Enter to keep, f/d/r/m to change):")
+        label_width = max(len(label) for _, label, _ in rows)
+
+        for i, (kind, label, current) in enumerate(rows):
+            raw = input(f"     {label:<{label_width}}  [{current}]: ").strip().lower()
+            if not raw:
+                continue
+
+            new_mode = _alias.get(raw)
+            if not new_mode:
+                print(f"        ⚠️  Invalid mode {raw!r} — keeping {current}")
+                continue
+            if new_mode == current:
+                continue
+
+            # Singleton foundational guard — count any OTHER row that's
+            # already foundational (including ones we just upgraded in
+            # this loop).
+            if new_mode == "foundational":
+                others = sum(
+                    1 for j, (_, _, m) in enumerate(rows)
+                    if j != i and m == "foundational"
+                )
+                if others > 0:
+                    print(f"        ⚠️  Another source is already foundational. Keeping {current}.")
+                    continue
+
+            # Apply.
+            if kind == "non_ancillary":
+                pm[label] = new_mode
+            else:
+                for entry in ancillary_entries:
+                    if (entry.get("source_id") or entry.get("file")) == label:
+                        entry["processing_mode"] = new_mode
+                        break
+
+            rows[i] = (kind, label, new_mode)
+            print(f"        → {new_mode}")
+
+        return config
 
     def _merge_updates(
         self,
