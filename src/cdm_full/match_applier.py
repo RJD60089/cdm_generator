@@ -119,9 +119,11 @@ def apply_match_files(
                 continue
             if not anchored:
                 continue
-            if source_mode != "refiner":
+            if source_mode not in ("refiner", "driver"):
                 # mapper-mode sources can never add to the CDM; foundational
-                # sources don't run match.
+                # sources don't run match.  In anchored mode driver collapses
+                # to refiner because the synthesis it was meant to shape was
+                # skipped — so let it propose attribute-only additions too.
                 continue
             if target_normalized not in entity_lookup:
                 # The LLM proposed an attribute on an entity that doesn't
