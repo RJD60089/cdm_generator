@@ -97,6 +97,14 @@ class ConfigGenerator(ConfigGeneratorBase):
         else:
             print(f"      Ancillary: {len(existing_anc)} existing, 0 new files")
         
+        # Step 2b: Review processing modes (interactive; skippable).
+        # Placed BEFORE AI analysis so mode-aware behavior in downstream
+        # rationalizers/match (where it kicks in) sees the user's final
+        # intent, and so the user doesn't have to wait through every AI
+        # pass before being allowed to flip a mode.
+        if prompt_user_choice("\n   Review processing modes for all sources?", default="N"):
+            self._review_processing_modes(source_config, new_ancillaries)
+
         # Step 3: Run analyses based on user selections
         fhir_result = None
         ncpdp_result = None
@@ -176,10 +184,6 @@ class ConfigGenerator(ConfigGeneratorBase):
             new_ancillaries=new_ancillaries,
             guardrails_result=guardrails_result,
         )
-
-        # Step 4b: Review processing modes (interactive; skippable)
-        if prompt_user_choice("\n   Review processing modes for all sources?", default="N"):
-            updated_config = self._review_processing_modes(updated_config)
 
         # Step 5: Save with new timestamp
         filepath = self.save_config(updated_config)
@@ -335,21 +339,25 @@ class ConfigGenerator(ConfigGeneratorBase):
             })
         return new_entries
 
-    def _review_processing_modes(self, config: Dict) -> Dict:
+    def _review_processing_modes(
+        self,
+        source_config: Dict,
+        new_ancillaries: List[Dict],
+    ) -> None:
         """Interactive: show every configured source's processing_mode and
         let the user change any of them.
 
-        Non-ancillary modes live in ``config["processing_modes"][slug]``.
-        Ancillary modes live per-entry as ``entry["processing_mode"]`` on
-        each ``config["input_files"]["ancillary"]`` element.
+        Mutates ``source_config`` (its ``processing_modes`` dict and any
+        existing ancillary entries) AND the ``new_ancillaries`` list in
+        place.  These two together cover the full source set at this
+        stage of run() — the final ``_merge_updates`` later carries the
+        mutations into the saved config.
 
         Enforces the singleton-foundational invariant — attempting to
         flip a second source to ``foundational`` is rejected with a
         warning; the existing value is kept.
-
-        Returns the (in-place modified) config.
         """
-        input_files = config.get("input_files") or {}
+        input_files = source_config.get("input_files") or {}
 
         def _has_section(slug: str) -> bool:
             if slug == "fhir":
@@ -361,23 +369,40 @@ class ConfigGenerator(ConfigGeneratorBase):
                 )
             return bool(input_files.get(slug))
 
-        pm: Dict[str, str] = config.setdefault("processing_modes", {})
-        ancillary_entries: List[Dict] = input_files.get("ancillary") or []
+        pm: Dict[str, str] = source_config.setdefault("processing_modes", {})
+        existing_ancillary: List[Dict] = input_files.get("ancillary") or []
 
-        # Build a flat review list.  Tuples are (kind, label, current_mode).
-        rows: List[tuple] = []
+        # rows: list of [label, current_mode, apply_fn] where apply_fn
+        # writes the chosen mode back to the right place (pm dict, an
+        # existing ancillary entry, or a new_ancillaries entry).
+        rows: List[list] = []
+
         for slug in ("fhir", "ncpdp", "guardrails", "glue", "edw"):
-            if _has_section(slug):
-                rows.append(("non_ancillary", slug, pm.get(slug, "refiner")))
-        for entry in ancillary_entries:
+            if not _has_section(slug):
+                continue
+            current = pm.get(slug, "refiner")
+            def _apply_slug(new_mode: str, _slug=slug) -> None:
+                pm[_slug] = new_mode
+            rows.append([slug, current, _apply_slug])
+
+        for entry in existing_ancillary:
             sid = entry.get("source_id") or entry.get("file") or "<unnamed>"
-            rows.append(("ancillary", sid, entry.get("processing_mode") or "refiner"))
+            current = entry.get("processing_mode") or "refiner"
+            def _apply_entry(new_mode: str, _entry=entry) -> None:
+                _entry["processing_mode"] = new_mode
+            rows.append([sid, current, _apply_entry])
+
+        for entry in new_ancillaries or []:
+            sid = entry.get("source_id") or entry.get("file") or "<unnamed>"
+            current = entry.get("processing_mode") or "refiner"
+            def _apply_new(new_mode: str, _entry=entry) -> None:
+                _entry["processing_mode"] = new_mode
+            rows.append([sid, current, _apply_new])
 
         if not rows:
             print(f"\n   (no sources configured — nothing to review)")
-            return config
+            return
 
-        # Mode shortcut table
         _alias = {
             "f": "foundational", "foundational": "foundational",
             "d": "driver",       "driver":       "driver",
@@ -386,9 +411,10 @@ class ConfigGenerator(ConfigGeneratorBase):
         }
 
         print(f"\n   Review processing modes (Enter to keep, f/d/r/m to change):")
-        label_width = max(len(label) for _, label, _ in rows)
+        label_width = max(len(label) for label, _, _ in rows)
 
-        for i, (kind, label, current) in enumerate(rows):
+        for i, row in enumerate(rows):
+            label, current, apply_fn = row
             raw = input(f"     {label:<{label_width}}  [{current}]: ").strip().lower()
             if not raw:
                 continue
@@ -400,31 +426,15 @@ class ConfigGenerator(ConfigGeneratorBase):
             if new_mode == current:
                 continue
 
-            # Singleton foundational guard — count any OTHER row that's
-            # already foundational (including ones we just upgraded in
-            # this loop).
             if new_mode == "foundational":
-                others = sum(
-                    1 for j, (_, _, m) in enumerate(rows)
-                    if j != i and m == "foundational"
-                )
+                others = sum(1 for j, r in enumerate(rows) if j != i and r[1] == "foundational")
                 if others > 0:
                     print(f"        ⚠️  Another source is already foundational. Keeping {current}.")
                     continue
 
-            # Apply.
-            if kind == "non_ancillary":
-                pm[label] = new_mode
-            else:
-                for entry in ancillary_entries:
-                    if (entry.get("source_id") or entry.get("file")) == label:
-                        entry["processing_mode"] = new_mode
-                        break
-
-            rows[i] = (kind, label, new_mode)
+            apply_fn(new_mode)
+            row[1] = new_mode
             print(f"        → {new_mode}")
-
-        return config
 
     def _merge_updates(
         self,
