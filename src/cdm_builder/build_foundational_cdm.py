@@ -379,12 +379,56 @@ def run_step3a(
     """
     
     print(f"\n🏗️  Building {config.cdm.domain} CDM...")
-    
+
     # Find rationalized files
     if rationalized_dir is None:
         rationalized_dir = outdir.parent / "rationalized"
-    
+
     domain_safe = config.cdm.domain.replace(' ', '_')
+
+    # --- Anchored mode short-circuit ---------------------------------
+    # If config declares a foundational source, the user's rationalized
+    # file IS the canonical CDM.  Promote it deterministically and skip
+    # the synthesis prompt.
+    foundational = (
+        config.get_foundational_source()
+        if hasattr(config, "get_foundational_source") else None
+    )
+    if foundational:
+        source_id = foundational["source_id"]
+        # Match the rationalizer's filename convention.  Non-ancillary
+        # sources use the source-type slug; ancillaries use source_id
+        # directly.
+        prefix = f"rationalized_{source_id}_{domain_safe.lower()}"
+        anchored_path = find_latest_rationalized(rationalized_dir, prefix)
+        if anchored_path is None:
+            # Try the original-case domain too (some rationalizers don't lowercase).
+            anchored_path = find_latest_rationalized(
+                rationalized_dir, f"rationalized_{source_id}_{domain_safe}"
+            )
+        if anchored_path is None:
+            print(
+                f"   ❌ Anchored mode: rationalized foundational source not found.\n"
+                f"      Expected file matching: rationalized_{source_id}_{domain_safe}_*.json\n"
+                f"      Run Step 1 to rationalize the foundational source first."
+            )
+            return None
+
+        print(f"   ⚓ Anchored mode: promoting {anchored_path.name} → foundational CDM")
+        from src.cdm_builder.promote_to_foundational import promote_file
+        outdir.mkdir(parents=True, exist_ok=True)
+        out_path = promote_file(
+            rationalized_path=anchored_path,
+            domain=config.cdm.domain,
+            source_id=source_id,
+            outdir=outdir,
+        )
+        with open(out_path, "r", encoding="utf-8") as f:
+            cdm = json.load(f)
+        print(f"   ✅ Foundational CDM written: {out_path.name}")
+        print(f"      Entities: {len(cdm.get('entities', []))}")
+        return cdm
+    # ----------------------------------------------------------------
     
     # Load rationalized sources
     print(f"   📂 Loading rationalized sources from: {rationalized_dir}")
@@ -410,11 +454,24 @@ def run_step3a(
     if edw_file is None:
         edw_file = find_latest_rationalized(rationalized_dir, f"rationalized_edw_entities_{domain_safe}")
 
-    guardrails_data = load_rationalized_file(guardrails_file)
-    glue_data = load_rationalized_file(glue_file)
-    fhir_data = load_rationalized_file(fhir_file)
-    ncpdp_data = load_rationalized_file(ncpdp_file)
-    edw_data = load_rationalized_file(edw_file)
+    # Honor per-source-type processing_mode: only refiner-mode sources
+    # feed the synthesized foundational build prompt.  Mapper-mode and
+    # foundational-mode sources are skipped here — mappers are lineage-
+    # only by contract, and foundational sources are handled by the
+    # anchored-mode promote path (Phase 4), not this prompt.
+    mode_map = config.get_source_mode_map() if hasattr(config, "get_source_mode_map") else {}
+
+    def _load_if_refiner(slug: str, path):
+        if mode_map.get(slug, "refiner") != "refiner":
+            print(f"   ⏭  {slug.upper()} skipped (processing_mode={mode_map.get(slug)})")
+            return None
+        return load_rationalized_file(path)
+
+    guardrails_data = _load_if_refiner("guardrails", guardrails_file)
+    glue_data       = _load_if_refiner("glue",       glue_file)
+    fhir_data       = _load_if_refiner("fhir",       fhir_file)
+    ncpdp_data      = _load_if_refiner("ncpdp",      ncpdp_file)
+    edw_data        = _load_if_refiner("edw",        edw_file)
 
     # Load ancillary sources by processing mode
     def _load_ancillary_by_mode(mode: str) -> Optional[Dict]:

@@ -49,27 +49,37 @@ def generate_gap_report(
             "total_requires_review": len(requires_review),
             "total_errors": len(errors),
             "unmapped_by_source": {},
-            "requires_review_by_source": {}
+            "unmapped_by_mode": {},
+            "requires_review_by_source": {},
+            "requires_review_by_mode": {},
         },
         "unmapped_fields": unmapped,
         "requires_review_fields": requires_review,
         "application_errors": errors,
         "suggested_cdm_additions": []
     }
-    
-    # Group unmapped by source
+
+    # Group unmapped by source and mode
     for field in unmapped:
         source = field.get("source_type")
-        if source not in gap_report["summary"]["unmapped_by_source"]:
-            gap_report["summary"]["unmapped_by_source"][source] = 0
-        gap_report["summary"]["unmapped_by_source"][source] += 1
-    
-    # Group requires_review by source
+        mode = field.get("processing_mode") or "unknown"
+        gap_report["summary"]["unmapped_by_source"][source] = (
+            gap_report["summary"]["unmapped_by_source"].get(source, 0) + 1
+        )
+        gap_report["summary"]["unmapped_by_mode"][mode] = (
+            gap_report["summary"]["unmapped_by_mode"].get(mode, 0) + 1
+        )
+
+    # Group requires_review by source and mode
     for field in requires_review:
         source = field.get("source_type")
-        if source not in gap_report["summary"]["requires_review_by_source"]:
-            gap_report["summary"]["requires_review_by_source"][source] = 0
-        gap_report["summary"]["requires_review_by_source"][source] += 1
+        mode = field.get("processing_mode") or "unknown"
+        gap_report["summary"]["requires_review_by_source"][source] = (
+            gap_report["summary"]["requires_review_by_source"].get(source, 0) + 1
+        )
+        gap_report["summary"]["requires_review_by_mode"][mode] = (
+            gap_report["summary"]["requires_review_by_mode"].get(mode, 0) + 1
+        )
     
     # Suggest CDM additions (group by suggested entity)
     suggestions = {}

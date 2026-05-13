@@ -13,9 +13,17 @@ Flow:
 4. Return structured list for config['input_files']['ancillary']
 
 Processing modes:
-  - driver  : Shapes the foundational CDM (injected as structural scaffold)
-  - refiner : Maps to CDM, then refines based on gaps (analyze/review/apply)
-  - mapper  : Maps to CDM for source lineage only (no structural changes)
+  - foundational : This source IS the CDM — promoted directly to foundational
+                   (anchored mode).  At most one source per pipeline; when
+                   present, Step 2's foundational build prompt is skipped.
+  - refiner      : Source data feeds Step 2's foundational build prompt; in
+                   anchored mode, may also propose attribute-only additions
+                   in Step 5 match.
+  - mapper       : Source-to-target lineage only — never shapes the CDM.
+  - driver       : DEPRECATED.  Historical "prefoundation scaffold" mode;
+                   silently ignored when a foundational source exists.  No
+                   longer offered as a choice for new files (kept for
+                   backward-compatible config loading).
 """
 
 import re
@@ -35,12 +43,17 @@ FILE_TYPES = [
     ("other", "Other format"),
 ]
 
-# Processing mode choices
+# Processing mode choices.  'foundational' is the singleton anchored-CDM
+# mode (at most one across all sources).  'driver' is deprecated and no
+# longer offered as a new choice but still accepted from legacy configs.
 PROCESSING_MODES = [
-    ("driver", "Driver — shape the foundational CDM from this source"),
-    ("refiner", "Refiner — map first, then refine CDM based on gaps"),
+    ("foundational", "Foundational — this source IS the CDM (anchored mode; at most one)"),
+    ("refiner", "Refiner — feeds foundational synthesis; may fill attribute gaps in anchored mode"),
     ("mapper", "Mapper — map to CDM for lineage only (no CDM changes)"),
 ]
+
+# Modes accepted on config load (includes deprecated 'driver' for backward compat).
+ACCEPTED_MODES = {"foundational", "refiner", "mapper", "driver"}
 
 
 def _prompt_choice(label: str, choices: List[tuple], default_idx: int = 0) -> str:

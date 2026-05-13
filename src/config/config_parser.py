@@ -59,7 +59,14 @@ class AppConfig:
     naming_standard: List[str] = field(default_factory=list)
     edw: List[str] = field(default_factory=list)
     ancillary: List[Dict[str, Any]] = field(default_factory=list)
-    
+
+    # Per-source-type processing_mode (foundational|refiner|mapper) for
+    # non-ancillary sources.  Ancillaries carry processing_mode per file
+    # on the ancillary entries themselves; this dict covers the canonical
+    # source types whose rationalizers produce one file each.  Keys match
+    # the lowercased source-type slugs used in gap-report rows.
+    processing_modes: Dict[str, str] = field(default_factory=dict)
+
     # Thresholds
     entity_threshold: float = 0.006
     attribute_threshold: float = 0.004
@@ -140,7 +147,7 @@ class AppConfig:
         """Get ancillary files filtered by processing mode.
 
         Args:
-            mode: Processing mode ('driver', 'refiner', or 'mapper')
+            mode: Processing mode ('foundational', 'driver', 'refiner', or 'mapper')
 
         Returns:
             List of ancillary file entries matching the mode
@@ -150,6 +157,85 @@ class AppConfig:
     def get_ancillary_source_ids(self) -> List[str]:
         """Get all unique ancillary source_ids."""
         return [a.get('source_id', 'ancillary') for a in self.ancillary]
+
+    def get_sources_by_mode(self, mode: str) -> List[Dict[str, Any]]:
+        """List every configured source whose processing_mode matches.
+
+        Returns a uniform descriptor list across all source types:
+
+            [{"source_type": "fhir",      "source_id": "fhir",      "mode": ...},
+             {"source_type": "ancillary", "source_id": "ancillary-pc2-ddl", ...},
+             ...]
+
+        The 'source_type' field is the rationalizer slug (fhir, ncpdp,
+        guardrails, glue, edw, ancillary).  The 'source_id' is the
+        rationalized-file source identifier used as the gap-report key
+        (same slug for canonical sources; the ancillary source_id for
+        ancillaries).
+        """
+        target = mode.lower()
+        out: List[Dict[str, Any]] = []
+        mode_map = self.get_source_mode_map()
+        for source_id, src_mode in mode_map.items():
+            if (src_mode or "").lower() != target:
+                continue
+            # 'source_id' for ancillaries already carries the 'ancillary-'
+            # prefix from config_gen_ancillary._generate_source_id().
+            source_type = "ancillary" if source_id.startswith("ancillary-") else source_id
+            out.append({
+                "source_type": source_type,
+                "source_id": source_id,
+                "mode": src_mode,
+            })
+        return out
+
+    def get_foundational_source(self) -> Optional[Dict[str, Any]]:
+        """Return the singleton foundational source descriptor, or None.
+
+        Anchored vs. synthesized mode is determined by whether this
+        returns a value.  If multiple foundational sources are configured
+        the migrator rejects the config before this point — at runtime we
+        return the first match and the caller can trust singleton
+        semantics.
+        """
+        foundational = self.get_sources_by_mode("foundational")
+        return foundational[0] if foundational else None
+
+    def get_source_mode_map(self) -> Dict[str, str]:
+        """Map every configured source identifier to its processing_mode.
+
+        Keys match the lowercased source_type strings discovered from
+        rationalized filenames (and stamped onto gap-report rows by
+        match_applier).  For canonical source types the key is the slug
+        (e.g. 'fhir', 'ncpdp', 'guardrails', 'glue', 'edw').  For
+        ancillaries the key is the source_id (lowercased).
+
+        Sources without an explicit processing_mode default to 'refiner',
+        preserving today's implicit "shape the foundational + map in
+        Step 5" behavior.  Migration (Phase 3) stamps explicit modes
+        onto existing configs so this default is rarely exercised.
+        """
+        mode_map: Dict[str, str] = {}
+
+        # Non-ancillary sources: read from processing_modes dict (Phase 3
+        # config layout); legacy configs without it default to 'refiner'.
+        if self.has_fhir():
+            mode_map["fhir"] = self.processing_modes.get("fhir", "refiner")
+        if self.has_ncpdp():
+            mode_map["ncpdp"] = self.processing_modes.get("ncpdp", "refiner")
+        if self.has_guardrails():
+            mode_map["guardrails"] = self.processing_modes.get("guardrails", "refiner")
+        if self.has_glue():
+            mode_map["glue"] = self.processing_modes.get("glue", "refiner")
+        if self.has_edw():
+            mode_map["edw"] = self.processing_modes.get("edw", "refiner")
+
+        for anc in self.ancillary or []:
+            sid = anc.get("source_id")
+            if sid:
+                mode_map[sid.lower()] = anc.get("processing_mode", "refiner")
+
+        return mode_map
     
     def get_fhir_by_type(self, file_type: str) -> List[Dict[str, Any]]:
         """Get FHIR IGs filtered by file_type (StructureDefinition, ValueSet, CodeSystem)"""
@@ -244,6 +330,10 @@ def load_config(config_path: str) -> AppConfig:
             naming_standard=input_files.get('naming_standard', []),
             edw=input_files.get('edw', []),
             ancillary=input_files.get('ancillary', []),
+            processing_modes={
+                k.lower(): str(v).lower()
+                for k, v in (data.get('processing_modes') or {}).items()
+            },
             entity_threshold=data.get('thresholds', {}).get('entity_threshold', 0.006),
             attribute_threshold=data.get('thresholds', {}).get('attribute_threshold', 0.004),
             metadata=data.get('metadata', {})
