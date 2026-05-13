@@ -142,11 +142,17 @@ def resolve_prompt_variant(processing_mode: str, source_mode: str) -> str:
         in match_applier (Step 2 already did structural growth) but reason
         categories still required
       - "default": fallback when mode is unknown (treated as refiner_synthesized)
+
+    Driver-mode sources behave like refiner during Step 5: in synthesized
+    mode their distinctive contribution (the prefoundation scaffold pass)
+    happens in Step 2, leaving Step 5 the same.  In anchored mode the
+    Step-2 contribution is skipped entirely, so driver effectively
+    collapses to refiner — same prompt variant, same applier policy.
     """
     mode = (processing_mode or "refiner").lower()
     if mode == "mapper":
         return "mapper"
-    if mode == "refiner":
+    if mode in ("refiner", "driver"):
         return "refiner_anchored" if (source_mode or "").lower() == "anchored" else "refiner_synthesized"
     return "default"
 
