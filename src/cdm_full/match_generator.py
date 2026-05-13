@@ -116,6 +116,67 @@ def build_compact_catalog(full_cdm: Dict) -> Dict:
 
 
 # =============================================================================
+# PROMPT VARIANT RESOLVER
+# =============================================================================
+
+# Reason categories the LLM must use when marking an attribute "unmapped".
+# Merged from postprocess_rematch — Step 5 now produces these directly so
+# the standalone rematch is only needed for ad-hoc re-runs.
+_UNMAPPED_REASON_CATEGORIES = (
+    "no_cdm_equivalent",   # legitimate business field but CDM has no matching attribute
+    "cross_domain",        # field belongs to a different CDM domain
+    "excluded_by_design",  # field belongs to a domain this CDM explicitly excludes
+    "technical_metadata",  # ETL/DW technical field with no business meaning in CDM
+    "bare_code_stub",      # field code with no recoverable business semantics
+)
+
+
+def resolve_prompt_variant(processing_mode: str, source_mode: str) -> str:
+    """Return the prompt variant key for a given (mode, source_mode) pair.
+
+    Variants:
+      - "mapper": lineage-only; do NOT emit additions; unmapped is acceptable
+      - "refiner_anchored": gap-fill only; additions limited to attributes
+        on existing entities; entity-level additions surfaced for review
+      - "refiner_synthesized": current behavior; additions silently dropped
+        in match_applier (Step 2 already did structural growth) but reason
+        categories still required
+      - "default": fallback when mode is unknown (treated as refiner_synthesized)
+    """
+    mode = (processing_mode or "refiner").lower()
+    if mode == "mapper":
+        return "mapper"
+    if mode == "refiner":
+        return "refiner_anchored" if (source_mode or "").lower() == "anchored" else "refiner_synthesized"
+    return "default"
+
+
+def _additions_instruction(variant: str) -> str:
+    """Return the additions-block instruction text for a prompt variant."""
+    if variant == "mapper":
+        return (
+            "ADDITIONS: This source is mapper-mode (lineage-only).  Do NOT "
+            "emit an 'additions' block.  Unmapped attributes stay unmapped."
+        )
+    if variant == "refiner_anchored":
+        return (
+            "ADDITIONS (anchored mode — gap-fill only):\n"
+            "  The CDM was provided by the user as authoritative.  You MAY "
+            "propose adding ATTRIBUTES to entities that already exist.  You "
+            "MUST NOT propose new entities, new relationships, or any change "
+            "that extends the CDM's scope beyond the entities currently "
+            "defined.  Emit proposals in an 'additions' array; the applier "
+            "drops any 'add_entity' proposal and surfaces it for review."
+        )
+    return (
+        "ADDITIONS: If a source attribute represents a business concept "
+        "missing from the CDM, you MAY emit a proposal in an 'additions' "
+        "array.  In synthesized mode the foundational build already "
+        "incorporated refiner data, so additions are typically unnecessary."
+    )
+
+
+# =============================================================================
 # PROMPT BUILDERS
 # =============================================================================
 
@@ -125,10 +186,17 @@ def build_source_entity_prompt(
     compact_catalog: Dict,
     source_entity: Dict,
     domain_description: str,
+    prompt_variant: str = "default",
 ) -> str:
     """
     Build prompt for a small entity — all attributes in a single call.
     Used when attribute count <= BATCH_THRESHOLD.
+
+    The prompt now subsumes the rematch behaviors that previously ran as
+    a separate post-process: cross-entity search is explicit, unmapped
+    rows must carry a reason_category from a fixed enum, and an
+    additions block invites refiner-mode sources to propose gap-fills
+    (governed by prompt_variant — see resolve_prompt_variant).
     """
     entity_name = source_entity.get("entity_name")
     attributes = source_entity.get("attributes", [])
@@ -145,11 +213,20 @@ Business Context: {source_entity.get("business_context", "N/A")}
 Attributes to map: {len(attributes)}
 
 TASK:
-1. For each source attribute, find the best matching CDM entity.attribute
-2. Extract validation_rules and business_rules from source metadata
-3. High Quality mapping is REQUIRED - review EACH AND EVERY ATTRIBUTE for a proper match in CDM.
-4. There should be few unmapped attributes. If one occurs, mark as gap (potential CDM addition needed).
-5. If confidence is low for an attribute mapping, set requires_review=true and include review_reason.
+1. For each source attribute, find the best matching CDM entity.attribute.
+   The source entity's primary CDM target is the most likely home for its
+   attributes, but you MUST evaluate every CDM entity when mapping each
+   attribute.  Cross-entity mappings are expected and correct — do not
+   anchor on the primary target if a better match exists elsewhere.
+2. Extract validation_rules and business_rules from source metadata.
+3. High Quality mapping is REQUIRED — review EACH AND EVERY ATTRIBUTE for
+   a proper match in the CDM.
+4. Few unmapped attributes are expected.  When marking unmapped, you MUST
+   populate "reason_category" with one of: {", ".join(_UNMAPPED_REASON_CATEGORIES)}.
+5. If confidence is low for a mapping, set requires_review=true and
+   include review_reason.
+
+{_additions_instruction(prompt_variant)}
 
 CRITICAL: Every source attribute MUST appear in attribute_mappings with disposition "mapped" or "unmapped".
 
@@ -195,11 +272,24 @@ OUTPUT (JSON only, no markdown):
     {{
       "source_attribute": "unknown_field",
       "disposition": "unmapped",
-      "reason": "No semantic match in CDM - potential gap",
+      "reason_category": "no_cdm_equivalent",
+      "reason": "Legitimate business field but CDM has no matching attribute",
       "suggested_cdm_entity": "Carrier",
       "suggested_attribute_name": "unknown_field",
       "validation_rules_extracted": [],
       "business_rules_extracted": []
+    }}
+  ],
+  "additions": [
+    {{
+      "action": "add_attribute",
+      "target_entity": "Carrier",
+      "attribute_name": "carrier_npi",
+      "data_type": "VARCHAR(10)",
+      "required": false,
+      "description": "National Provider Identifier for the carrier",
+      "source_attribute": "carrier_npi",
+      "reasoning": "Source has carrier NPI; no equivalent attribute in CDM"
     }}
   ],
   "summary": {{
@@ -243,6 +333,7 @@ def build_batch_prompt(
     batch_num: int,
     total_batches: int,
     entity_evaluation: Optional[Dict] = None,
+    prompt_variant: str = "default",
 ) -> str:
     """
     Build prompt for one batch of a large entity.
@@ -322,10 +413,15 @@ Business Context: {source_entity.get("business_context", "N/A")}
 TASK:
 - Map ONLY the {len(batch_attrs)} attributes listed in "ATTRIBUTES TO MAP NOW"
 {entity_eval_instruction}
+- Evaluate every CDM entity when mapping each attribute — cross-entity
+  mappings are expected and correct.  Do not anchor on the primary target.
 - Extract validation_rules and business_rules from source metadata
 - High quality mapping is REQUIRED for every attribute in this batch
-- Few unmapped attributes expected — mark genuine gaps with disposition "unmapped"
+- Few unmapped expected — for each unmapped row, populate "reason_category"
+  with one of: {", ".join(_UNMAPPED_REASON_CATEGORIES)}
 - Low confidence mappings: set requires_review=true with review_reason
+
+{_additions_instruction(prompt_variant)}
 
 CRITICAL:
 - Map ONLY the attributes in "ATTRIBUTES TO MAP NOW" — return EXACTLY {len(batch_attrs)} mappings
@@ -385,7 +481,8 @@ def _map_entity_chunked(
     source_entity: Dict,
     domain_description: str,
     llm: LLMClient,
-) -> Tuple[Dict, List[Dict]]:
+    prompt_variant: str = "default",
+) -> Tuple[Dict, List[Dict], List[Dict]]:
     """
     Map a large entity in batches of BATCH_SIZE.
 
@@ -398,6 +495,7 @@ def _map_entity_chunked(
     n_batches = len(batches)
 
     all_mappings: List[Dict] = []
+    all_additions: List[Dict] = []
     entity_evaluation: Optional[Dict] = None
 
     for bi, batch in enumerate(batches, 1):
@@ -420,6 +518,7 @@ def _map_entity_chunked(
             batch_num=bi,
             total_batches=n_batches,
             entity_evaluation=entity_evaluation,
+            prompt_variant=prompt_variant,
         )
 
         messages = [
@@ -443,6 +542,10 @@ def _map_entity_chunked(
 
         batch_mappings = result.get("attribute_mappings", [])
         all_mappings.extend(batch_mappings)
+        # Additions: only batch 1 typically returns them (entity-level
+        # gap-fill proposals), but accept from any batch defensively.
+        if isinstance(result.get("additions"), list):
+            all_additions.extend(result["additions"])
 
         batch_summary = result.get("summary", {})
         print(
@@ -465,7 +568,7 @@ def _map_entity_chunked(
             "reasoning": "Entity evaluation not returned by AI",
         }
 
-    return entity_evaluation, all_mappings
+    return entity_evaluation, all_mappings, all_additions
 
 
 # =============================================================================
@@ -482,6 +585,7 @@ def generate_match_file(
     domain_description: str,
     dry_run: bool = False,
     max_workers: int = 1,
+    prompt_variant: str = "default",
 ) -> Optional[Path]:
     """
     Generate match file for a single source.
@@ -584,9 +688,10 @@ def generate_match_file(
 
         try:
             if attr_count > BATCH_THRESHOLD:
-                entity_evaluation, all_mappings = _map_entity_chunked(
+                entity_evaluation, all_mappings, all_additions = _map_entity_chunked(
                     config, source_type, compact_catalog,
                     source_entity, domain_description, llm,
+                    prompt_variant=prompt_variant,
                 )
                 mapped = sum(1 for m in all_mappings if m.get("disposition") == "mapped")
                 unmapped = sum(1 for m in all_mappings if m.get("disposition") == "unmapped")
@@ -596,6 +701,7 @@ def generate_match_file(
                     "source_entity": entity_name,
                     "entity_evaluation": entity_evaluation,
                     "attribute_mappings": all_mappings,
+                    "additions": all_additions,
                     "summary": {
                         "total_attributes": attr_count,
                         "mapped": mapped,
@@ -608,6 +714,7 @@ def generate_match_file(
                 prompt = build_source_entity_prompt(
                     config, source_type, compact_catalog,
                     source_entity, domain_description,
+                    prompt_variant=prompt_variant,
                 )
                 messages = [
                     {

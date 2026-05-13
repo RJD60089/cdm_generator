@@ -725,7 +725,24 @@ def run_rematch_postprocess(
         gaps = json.load(f)
 
     unmapped_fields = gaps.get("unmapped_fields", [])
-    print(f"   Total unmapped in gaps file: {len(unmapped_fields)}")
+    total_before_mode_filter = len(unmapped_fields)
+
+    # --- Mode filter: mapper-mode rows are lineage-only by contract.
+    # Rematching them would silently attach lineage to the CDM that the
+    # source's processing_mode forbids.  Rows stay in the on-disk gap
+    # report (and the Unmapped tab) for visibility; they just don't get
+    # re-attempted here.  Rows without a stamped processing_mode pass
+    # through — older gap files predate Phase 2 stamping.
+    unmapped_fields = [
+        f for f in unmapped_fields
+        if (f.get("processing_mode") or "refiner").lower() != "mapper"
+    ]
+    excluded_mapper = total_before_mode_filter - len(unmapped_fields)
+
+    print(f"   Total unmapped in gaps file: {total_before_mode_filter}")
+    if excluded_mapper:
+        print(f"   Excluded {excluded_mapper} mapper-mode rows (lineage-only by config)")
+    print(f"   Eligible for rematch:        {len(unmapped_fields)}")
 
     # --- Split candidate sets ---
     # Fuzzy pass is allowed to rescue previously-dispositioned fields

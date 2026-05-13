@@ -111,8 +111,6 @@ def run_auto(
     model_key: str = "gpt-5",
     workers: int = 16,
     steps_to_run: Optional[set] = None,
-    gap_threshold: float = 0.8,
-    reject_all_gaps: bool = False,
 ) -> None:
     """Unattended end-to-end CDM build (Steps 1–6) using config-driven defaults.
 
@@ -126,9 +124,7 @@ def run_auto(
       Step 2  — Build foundational CDM (single LLM call).
       Step 3  — Consolidation refinement: auto-reject all recommendations.
       Step 4  — PK/FK validation: auto-reject all findings.
-      Step 5  — Build Full CDM with `Remap All` mode and gap analysis.  The
-                refiner gate (if triggered) uses confidence-threshold review
-                via `auto_threshold` (default 0.8).
+      Step 5  — Build Full CDM with `Remap All` mode and gap analysis.
       Step 5p — Run every post-process step (rematch, field_codes, ancillary,
                 sensitivity, cde).
       Step 6  — Generate every artifact (Excel, DDL SQL, LucidChart CSV, Word
@@ -140,16 +136,9 @@ def run_auto(
         workers: Concurrent LLM workers for per-entity match generation
             and rule consolidation.  Default 16 (assumes Tier 4 OpenAI).
         steps_to_run: Set of step ints (1–6) to execute.  Default = all.
-        gap_threshold: Confidence threshold for auto-approving gap-driven
-            refinement recommendations (0.0–1.0).  Default 0.8.
-        reject_all_gaps: If True, sets the threshold to 1.01 — rejects all
-            gap recommendations.  Equivalent to --reject-all-gaps CLI flag.
     """
     if steps_to_run is None:
         steps_to_run = {1, 2, 3, 4, 5, 6}
-
-    if reject_all_gaps:
-        gap_threshold = 1.01  # > 1.0 means nothing passes
 
     print(f"\n{'='*60}")
     print(f"CDM AUTO ORCHESTRATION (unattended)")
@@ -158,7 +147,6 @@ def run_auto(
     print(f"   Model       : {model_key}")
     print(f"   Workers     : {workers}")
     print(f"   Steps       : {sorted(steps_to_run)}")
-    print(f"   Gap thresh. : {'reject-all' if reject_all_gaps else f'{gap_threshold:.0%}'}")
     print(f"{'='*60}")
 
     # --- Find existing config (auto mode does NOT run Step 0) ---
@@ -169,6 +157,9 @@ def run_auto(
         print(f"   Run interactively first: python cdm_orchestrator.py {cdm_name}", file=sys.stderr)
         sys.exit(1)
     print(f"\n   Config: {config_file.name}")
+
+    from src.config.config_migrator import maybe_migrate
+    maybe_migrate(Path(config_file))
 
     config = load_config(str(config_file))
     print(f"   Domain: {config.cdm.domain}")
@@ -280,20 +271,30 @@ def run_auto(
     # STEP 3: CONSOLIDATION (auto-reject all)
     # ============================================================
     if 3 in steps_to_run:
-        print(f"\n{'='*60}")
-        print(f"STEP 3: CONSOLIDATION (auto — reject all)")
-        print(f"{'='*60}")
-
-        cdm_outdir = base_outdir / "cdm"
-        from src.refinement.refine_consolidation import run_consolidation_refinement
-        run_consolidation_refinement(
-            config=config,
-            cdm_file=None,
-            outdir=cdm_outdir,
-            llm=llm,
-            dry_run=False,
-            auto_reject_all=True,
+        anchored = (
+            config.get_foundational_source() is not None
+            if hasattr(config, "get_foundational_source") else False
         )
+        if anchored:
+            print(f"\n{'='*60}")
+            print(f"STEP 3: CONSOLIDATION — SKIPPED (anchored mode)")
+            print(f"{'='*60}")
+            print(f"   The provided foundational CDM is treated as authoritative.")
+        else:
+            print(f"\n{'='*60}")
+            print(f"STEP 3: CONSOLIDATION (auto — reject all)")
+            print(f"{'='*60}")
+
+            cdm_outdir = base_outdir / "cdm"
+            from src.refinement.refine_consolidation import run_consolidation_refinement
+            run_consolidation_refinement(
+                config=config,
+                cdm_file=None,
+                outdir=cdm_outdir,
+                llm=llm,
+                dry_run=False,
+                auto_reject_all=True,
+            )
 
     # ============================================================
     # STEP 4: PK/FK VALIDATION (auto-reject all)
@@ -319,7 +320,7 @@ def run_auto(
     # ============================================================
     if 5 in steps_to_run:
         print(f"\n{'='*60}")
-        print(f"STEP 5: BUILD FULL CDM (auto — Remap All, gap-thresh={gap_threshold:.0%})")
+        print(f"STEP 5: BUILD FULL CDM (auto — Remap All)")
         print(f"{'='*60}")
 
         from src.cdm_full.build_full_cdm import run_build_full_cdm
@@ -349,7 +350,6 @@ def run_auto(
             generate_cdm=True,
             run_gap_analysis=True,
             match_workers=workers,
-            auto_threshold=gap_threshold,
         )
 
         # Step 5p — auto-run all post-processing steps non-interactively
@@ -431,13 +431,6 @@ Examples:
                          "Auto mode only.  Default: 16")
     ap.add_argument("--steps", default="1,2,3,4,5,6",
                     help="Comma-separated step list (auto mode only).  Default: 1,2,3,4,5,6")
-    ap.add_argument("--gap-threshold", type=float, default=0.8,
-                    help="Confidence threshold for auto-approving gap-driven refinement "
-                         "recommendations (0.0–1.0).  Auto mode only.  Default: 0.8")
-    ap.add_argument("--reject-all-gaps", action="store_true",
-                    help="Reject every gap-refinement recommendation regardless of confidence.  "
-                         "Auto mode only.  Equivalent to --gap-threshold 1.01")
-
     args = ap.parse_args()
     cdm_name = args.cdm_name
 
@@ -458,8 +451,6 @@ Examples:
             model_key=args.model,
             workers=args.workers,
             steps_to_run=steps,
-            gap_threshold=args.gap_threshold,
-            reject_all_gaps=args.reject_all_gaps,
         )
         return
     
@@ -512,7 +503,10 @@ Examples:
                 sys.exit(1)
         
         print(f"\nUsing configuration: {config_file}")
-        
+
+        from src.config.config_migrator import maybe_migrate
+        maybe_migrate(Path(config_file))
+
         # Load configuration
         config = load_config(str(config_file))
         print(f"✓ Configuration loaded")
@@ -747,26 +741,36 @@ Examples:
         
         # === STEP 3: REFINEMENT - CONSOLIDATION ===
         if 3 in steps_to_run:
-            print(f"\n{'='*60}")
-            print(f"STEP 3: REFINEMENT - CONSOLIDATION")
-            print(f"{'='*60}")
-
-            cdm_outdir = base_outdir / "cdm"
-            cdm_outdir.mkdir(parents=True, exist_ok=True)
-
-            from src.refinement.refine_consolidation import run_consolidation_refinement
-
-            cdm = run_consolidation_refinement(
-                config=config,
-                cdm_file=None,
-                outdir=cdm_outdir,
-                llm=llm,
-                dry_run=dry_run
+            anchored = (
+                config.get_foundational_source() is not None
+                if hasattr(config, "get_foundational_source") else False
             )
+            if anchored:
+                print(f"\n{'='*60}")
+                print(f"STEP 3: CONSOLIDATION — SKIPPED (anchored mode)")
+                print(f"{'='*60}")
+                print(f"   The provided foundational CDM is authoritative — no consolidation pass.")
+            else:
+                print(f"\n{'='*60}")
+                print(f"STEP 3: REFINEMENT - CONSOLIDATION")
+                print(f"{'='*60}")
 
-            print(f"\n{'='*60}")
-            print(f"✓ STEP 3 COMPLETE")
-            print(f"{'='*60}")
+                cdm_outdir = base_outdir / "cdm"
+                cdm_outdir.mkdir(parents=True, exist_ok=True)
+
+                from src.refinement.refine_consolidation import run_consolidation_refinement
+
+                cdm = run_consolidation_refinement(
+                    config=config,
+                    cdm_file=None,
+                    outdir=cdm_outdir,
+                    llm=llm,
+                    dry_run=dry_run
+                )
+
+                print(f"\n{'='*60}")
+                print(f"✓ STEP 3 COMPLETE")
+                print(f"{'='*60}")
 
         # === STEP 4: REFINEMENT - PK/FK VALIDATION ===
         if 4 in steps_to_run:
@@ -863,10 +867,8 @@ Examples:
                 if generate_cdm:
                     run_gap_analysis = prompt_user("Run gap analysis?", default="Y")
 
-                # Prompt: parallel match-file workers.  Even in Reuse
-                # mode the refiner gate inside Step 5 may trigger
-                # ancillary re-mapping, so we ask any time LLM matching
-                # is enabled at all (i.e., not skip_mapping and not
+                # Prompt: parallel match-file workers.  Asked any time
+                # LLM matching is enabled (not skip_mapping and not
                 # dry_run).  1 = sequential.  Tier 4 OpenAI accounts
                 # handle 8-16 comfortably.
                 match_workers = 1

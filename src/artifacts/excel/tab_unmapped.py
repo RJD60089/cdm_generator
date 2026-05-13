@@ -34,54 +34,59 @@ def create_unmapped_tab(
     )
     wrap_alignment = Alignment(wrap_text=True, vertical='top')
     
-    # Headers
+    # Headers — mode column lets reviewers filter mapper-mode rows
+    # (lineage-only by config) from refiner-mode rows (genuine gaps).
     headers = [
         "Source Type",
+        "Mode",
         "Source Entity",
-        "Source Attribute", 
+        "Source Attribute",
+        "Reason Category",
         "Reason",
         "Suggested CDM Entity",
-        "Suggested Attribute Name"
+        "Suggested Attribute Name",
     ]
-    
+
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
         cell.font = header_font
         cell.fill = header_fill
         cell.border = thin_border
         cell.alignment = Alignment(horizontal='center', vertical='center')
-    
+
     # Data
     row = 2
-    
+
     if gap_extractor:
         unmapped = gap_extractor.get_unmapped_fields()
-        
+
         for field in unmapped:
             ws.cell(row=row, column=1, value=field.source_type).border = thin_border
-            ws.cell(row=row, column=2, value=field.source_entity).border = thin_border
-            ws.cell(row=row, column=3, value=field.source_attribute).border = thin_border
-            ws.cell(row=row, column=4, value=field.reason or "").border = thin_border
-            ws.cell(row=row, column=4).alignment = wrap_alignment
-            ws.cell(row=row, column=5, value=field.suggested_cdm_entity or "").border = thin_border
-            ws.cell(row=row, column=6, value=field.suggested_attribute_name or "").border = thin_border
+            ws.cell(row=row, column=2, value=field.processing_mode or "").border = thin_border
+            ws.cell(row=row, column=3, value=field.source_entity).border = thin_border
+            ws.cell(row=row, column=4, value=field.source_attribute).border = thin_border
+            ws.cell(row=row, column=5, value=field.reason_category or "").border = thin_border
+            ws.cell(row=row, column=6, value=field.reason or "").border = thin_border
+            ws.cell(row=row, column=6).alignment = wrap_alignment
+            ws.cell(row=row, column=7, value=field.suggested_cdm_entity or "").border = thin_border
+            ws.cell(row=row, column=8, value=field.suggested_attribute_name or "").border = thin_border
             row += 1
-    
+
     if row == 2:
         # No data
         ws.cell(row=2, column=1, value="No unmapped fields identified")
         ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(headers))
-    
+
     # Column widths
-    widths = [15, 25, 30, 40, 25, 30]
+    widths = [15, 10, 25, 30, 18, 40, 25, 30]
     for col, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
-    
+
     # Freeze header
     ws.freeze_panes = 'A2'
-    
+
     # Auto-filter
     if row > 2:
-        ws.auto_filter.ref = f"A1:F{row-1}"
-    
+        ws.auto_filter.ref = f"A1:H{row-1}"
+
     return ws

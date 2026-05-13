@@ -16,6 +16,8 @@ class UnmappedField:
     reason: str
     suggested_cdm_entity: str
     suggested_attribute_name: str
+    processing_mode: str = ""
+    reason_category: str = ""
 
 
 @dataclass
@@ -29,6 +31,7 @@ class RequiresReviewField:
     mapping_type: str
     confidence: str
     review_reason: str
+    processing_mode: str = ""
 
 
 @dataclass
@@ -85,10 +88,12 @@ class GapExtractor:
                 source_attribute=field.get("source_attribute", ""),
                 reason=field.get("reason", ""),
                 suggested_cdm_entity=field.get("suggested_cdm_entity", ""),
-                suggested_attribute_name=field.get("suggested_attribute_name", "")
+                suggested_attribute_name=field.get("suggested_attribute_name", ""),
+                processing_mode=field.get("processing_mode", ""),
+                reason_category=field.get("reason_category", ""),
             ))
         return results
-    
+
     def get_requires_review_fields(self) -> List[RequiresReviewField]:
         """Get fields requiring SME review."""
         results = []
@@ -101,9 +106,20 @@ class GapExtractor:
                 cdm_attribute=field.get("cdm_attribute", ""),
                 mapping_type=field.get("mapping_type", ""),
                 confidence=field.get("confidence", ""),
-                review_reason=field.get("review_reason", "")
+                review_reason=field.get("review_reason", ""),
+                processing_mode=field.get("processing_mode", ""),
             ))
         return results
+
+    def get_extension_candidates(self) -> List[Dict[str, Any]]:
+        """Return add_entity proposals surfaced from anchored-mode match.
+
+        These are entity-level structural additions the LLM proposed
+        during Step 5 match that match_applier did NOT apply.  Surfaced
+        for SME review and possible incorporation into a future
+        foundational source.
+        """
+        return self.gaps.get("extension_candidates", []) or []
     
     def get_sme_questions(self) -> List[SMEQuestion]:
         """Extract SME questions from consolidation recommendations."""

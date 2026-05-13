@@ -12,26 +12,36 @@ Functions:
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 def apply_match_files(
     full_cdm: Dict,
     match_files: Dict[str, Path],
-    source_entities_lookup: Dict[str, Dict]
+    source_entities_lookup: Dict[str, Dict],
+    source_mode_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict, Dict]:
     """
     Apply all match files to full CDM.
     Uses case-insensitive matching for entities and attributes.
-    
+
     Args:
         full_cdm: Full CDM dict to update
         match_files: Dict of source_type -> match file path
         source_entities_lookup: Dict of source_type -> {entity_name: entity_dict}
-    
+        source_mode_map: Optional dict of source_type -> processing_mode.
+            When provided, every unmapped_fields and requires_review_fields
+            row is stamped with the source's mode so downstream consumers
+            (rematch, Excel tabs, extension reviews) can filter without
+            re-deriving mode from config.
+
     Returns:
         Tuple of (updated full_cdm, application_report)
     """
+    mode_map = {k.lower(): v for k, v in (source_mode_map or {}).items()}
+
+    def _stamp_mode(source_type: str) -> str:
+        return mode_map.get((source_type or "").lower(), "refiner")
     
     print(f"\n   {'─'*50}")
     print(f"   Applying match files to Full CDM")
@@ -58,20 +68,100 @@ def apply_match_files(
         "total_requires_review": 0,
         "unmapped_fields": [],
         "requires_review_fields": [],
-        "application_errors": []
+        "application_errors": [],
+        "extension_candidates": [],   # add_entity proposals surfaced from anchored mode
+        "additions_applied": [],      # add_attribute proposals applied to the CDM
     }
-    
+
+    # Anchored mode means the user provided the foundational CDM.  Only in
+    # anchored mode are refiner additions actually applied to the CDM.  In
+    # synthesized mode, Step 2's foundational build already incorporated
+    # refiner data, so match-time additions would duplicate that work and
+    # are silently dropped.
+    anchored = bool(full_cdm.get("anchored"))
+
     for source_type, match_file_path in match_files.items():
         print(f"   Applying: {source_type.upper()} ({match_file_path.name})")
-        
+
         with open(match_file_path, 'r', encoding='utf-8') as f:
             match_data = json.load(f)
-        
+
         # Get source entities for this source type
         source_entities = source_entities_lookup.get(source_type, {})
-        
+
         # Update source_files in CDM
         full_cdm["source_files"][source_type] = match_data.get("source_file")
+
+        # ── Apply additions FIRST, before lineage mapping ────────────
+        # Match-time additions (anchored-mode gap-fills) must land in
+        # the CDM before attribute_mappings reference them — otherwise
+        # the mappings will fail attribute-lookup and get logged as
+        # application_errors.
+        source_mode = _stamp_mode(source_type)
+        for addition in match_data.get("additions", []) or []:
+            action = (addition.get("action") or "").lower()
+            target_entity = addition.get("target_entity") or ""
+            target_normalized = target_entity.lower()
+
+            if action == "add_entity":
+                # add_entity is never applied automatically.  Anchored mode
+                # surfaces the proposal for human review; synthesized mode
+                # drops it (Step 2 owned structural decisions).
+                if anchored:
+                    application_report["extension_candidates"].append({
+                        "source_type": source_type,
+                        "processing_mode": source_mode,
+                        **addition,
+                    })
+                continue
+
+            if action != "add_attribute":
+                continue
+            if not anchored:
+                continue
+            if source_mode != "refiner":
+                # mapper-mode sources can never add to the CDM; foundational
+                # sources don't run match.
+                continue
+            if target_normalized not in entity_lookup:
+                # The LLM proposed an attribute on an entity that doesn't
+                # exist.  Treat as an extension candidate so it surfaces
+                # for review rather than silently inflating the gap report.
+                application_report["extension_candidates"].append({
+                    "source_type": source_type,
+                    "processing_mode": source_mode,
+                    "rejected_reason": f"target_entity {target_entity!r} not found",
+                    **addition,
+                })
+                continue
+
+            cdm_entity = entity_lookup[target_normalized]
+            attr_name = addition.get("attribute_name")
+            if not attr_name:
+                continue
+            if attr_name.lower() in cdm_entity["_attr_lookup"]:
+                # Already exists — nothing to add.
+                continue
+
+            new_attr = {
+                "attribute_name": attr_name,
+                "data_type": addition.get("data_type") or "VARCHAR(255)",
+                "required": bool(addition.get("required", False)),
+                "pk": False,
+                "description": addition.get("description") or "",
+                "source_lineage": {st: [] for st in match_files.keys()},
+                "validation_rules": [],
+                "business_rules": [],
+                "_added_by": {"source_type": source_type, "reasoning": addition.get("reasoning", "")},
+            }
+            cdm_entity.setdefault("attributes", []).append(new_attr)
+            cdm_entity["_attr_lookup"][attr_name.lower()] = new_attr
+            application_report["additions_applied"].append({
+                "source_type": source_type,
+                "processing_mode": source_mode,
+                "target_entity": target_entity,
+                "attribute_name": attr_name,
+            })
         
         source_mapped = 0
         source_unmapped = 0
@@ -210,6 +300,7 @@ def apply_match_files(
                         source_requires_review += 1
                         application_report["requires_review_fields"].append({
                             "source_type": source_type,
+                            "processing_mode": _stamp_mode(source_type),
                             "source_entity": source_entity_name,
                             "source_attribute": source_attr_name,
                             "cdm_entity": cdm_ent_name,
@@ -218,11 +309,12 @@ def apply_match_files(
                             "confidence": attr_mapping.get("confidence"),
                             "review_reason": attr_mapping.get("review_reason", "Low confidence mapping")
                         })
-                
+
                 else:  # unmapped
                     source_unmapped += 1
                     application_report["unmapped_fields"].append({
                         "source_type": source_type,
+                        "processing_mode": _stamp_mode(source_type),
                         "source_entity": source_entity_name,
                         "source_attribute": source_attr_name,
                         "reason": attr_mapping.get("reason", ""),
