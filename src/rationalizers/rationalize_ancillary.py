@@ -219,11 +219,16 @@ Return ONLY valid JSON in this structure:
       "source_files": ["{filename}::[SCHEMA].[TABLE]"],
       "description": "...",
       "business_context": "...",
+      "classification": "Core",
       "attributes": [
         {{
           "attribute_name": "[ATTRIBUTE NAME]",
           "source_files_element": ["{filename}::[SCHEMA].[TABLE]::[COLUMN]"],
-          "data_type": "string|number|date|boolean|decimal",
+          "data_type": "VARCHAR(50)",
+          "length": 50,
+          "precision": null,
+          "scale": null,
+          "pk": false,
           "required": true,
           "allow_null": false,
           "description": "...",
@@ -232,6 +237,15 @@ Return ONLY valid JSON in this structure:
           "data_classification": "Internal",
           "validation_rules": [],
           "business_rules": []
+        }}
+      ],
+      "relationships": [
+        {{
+          "related_entity": "[OTHER ENTITY NAME]",
+          "relationship_type": "many-to-one",
+          "cardinality": "N:1",
+          "fk_attribute": "[FOREIGN KEY ATTRIBUTE NAME ON THIS ENTITY]",
+          "description": "..."
         }}
       ]
     }}
@@ -244,8 +258,24 @@ Return ONLY valid JSON in this structure:
 - Output ONLY valid JSON (no markdown, no code blocks)
 - `attribute_name` = your rationalized/cleaned name for the CDM
 - `source_files_element` = source reference in file::schema.table::column format
-- Preserve data types from source (map to string/number/date/boolean/decimal)
-- Track PK/FK constraints in descriptions or business_rules
+- `pk: true` for any attribute that is a primary key (DO NOT just mention in description)
+- `data_type` MUST be a SQL type expression that downstream DDL can use directly.
+  Examples: VARCHAR(50), CHAR(10), INTEGER, BIGINT, DECIMAL(10,2), DATE,
+  TIMESTAMP, BOOLEAN, TEXT.  Prefer specific lengths over generic types.
+  - `length` (integer): the N from VARCHAR(N)/CHAR(N) when applicable, else null
+  - `precision` (integer): the P from DECIMAL(P,S) when applicable, else null
+  - `scale` (integer): the S from DECIMAL(P,S) when applicable, else null
+- `classification` for each entity, one of:
+  - "Core" — primary business entity (Member, Claim, Product, etc.)
+  - "Reference" — lookup / code / classification table (StatusCode, etc.)
+  - "Junction" — many-to-many link table joining two Core entities
+- `relationships` — emit one entry for each FK or implied relationship on
+  this entity.  `fk_attribute` is the column name on THIS entity that
+  references `related_entity`.  Detect FKs from:
+  - explicit FK metadata when the source provides it
+  - naming conventions: a column named `{{other_entity}}_id` is an FK to
+    an entity whose name resembles the prefix
+  - one-to-many indicators (a child entity referencing a parent)
 - Focus on elements relevant to: {self.cdm_description}
 
 ---
@@ -329,18 +359,19 @@ Generate the rationalized JSON now."""
                 attr: Dict[str, Any] = {
                     "attribute_name": raw_attr.get("attribute_name", ""),
                     "description": raw_attr.get("description", ""),
-                    "data_type": raw_attr.get("data_type", "string"),
+                    "data_type": raw_attr.get("data_type", "VARCHAR(255)"),
                     "source_attribute": raw_attr.get("source_files_element", []),
                     "source_files": raw_attr.get("source_files_element", []),
+                    "pk": bool(raw_attr.get("pk", False)),
                     "required": raw_attr.get("required", False),
                     "nullable": raw_attr.get("allow_null", True),
                     "cardinality": {
                         "min": 1 if raw_attr.get("required", False) else 0,
                         "max": "1",
                     },
-                    "length": None,
-                    "precision": None,
-                    "scale": None,
+                    "length": raw_attr.get("length"),
+                    "precision": raw_attr.get("precision"),
+                    "scale": raw_attr.get("scale"),
                     "default_value": None,
                     "is_array": False,
                     "is_nested": False,
@@ -359,6 +390,7 @@ Generate the rationalized JSON now."""
             entity: Dict[str, Any] = {
                 "entity_name": raw_entity.get("entity_name", ""),
                 "description": raw_entity.get("description", ""),
+                "classification": raw_entity.get("classification") or "Core",
                 "source_type": "Ancillary",
                 "source_info": {
                     "files": raw_entity.get("source_files", []),
@@ -375,6 +407,7 @@ Generate the rationalized JSON now."""
                     "pruning_notes": None,
                 },
                 "attributes": attributes,
+                "relationships": list(raw_entity.get("relationships", []) or []),
                 "source_metadata": {},
             }
             entities.append(entity)
