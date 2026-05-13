@@ -233,15 +233,18 @@ class ConfigGenerator(ConfigGeneratorBase):
             file, file_type (from extension), processing_mode (prompted),
             source_id (slugified filename without extension).
 
-        For each new file, the user is prompted to pick one of three
-        processing modes:
-            driver  — contributes to the Foundational CDM (entity-shaping)
-            refiner — refines the CDM during the refinement step
-            mapper  — used only for source-to-target mapping in Step 5
+        For each new file, the user is prompted to pick a processing mode:
+            foundational — this source IS the CDM (anchored mode; max one)
+            refiner      — feeds foundational synthesis; may fill
+                           attribute gaps in anchored mode  [default]
+            mapper       — source-to-target lineage only; never shapes CDM
 
         Existing ancillary entries are NEVER modified by this method;
         the caller appends the returned list to whatever's already there
         so AI-enriched fields (description, etc.) survive.
+
+        Driver mode is deprecated — accepted on existing configs for
+        backward compatibility but no longer offered to new files.
         """
         existing = (source_config.get("input_files") or {}).get("ancillary") or []
         existing_files = {(e.get("file") or "").lower() for e in existing}
@@ -255,10 +258,25 @@ class ConfigGenerator(ConfigGeneratorBase):
         if not candidates:
             return []
 
+        # Check whether the existing config already declares a foundational
+        # source.  At most one is permitted across the whole pipeline.
+        existing_foundational = any(
+            (e.get("processing_mode") == "foundational") for e in existing
+        )
+        # Also look across non-ancillary sources via the root-level
+        # processing_modes dict — set by the migrator.
+        if not existing_foundational:
+            existing_foundational = any(
+                v == "foundational"
+                for v in (source_config.get("processing_modes") or {}).values()
+            )
+
         print(f"\n   Found {len(candidates)} new ancillary file(s) — pick a processing mode for each:")
-        print(f"     d = driver   (contributes to Foundational CDM)")
-        print(f"     r = refiner  (refines the CDM during refinement step) [default]")
-        print(f"     m = mapper   (used only for Step 5 source-to-target mapping)")
+        print(f"     f = foundational  (this source IS the CDM; max one across the pipeline)")
+        print(f"     r = refiner       (feeds foundational synthesis / fills gaps) [default]")
+        print(f"     m = mapper        (source-to-target lineage only)")
+        if existing_foundational:
+            print(f"   ⚠️  A foundational source already exists — 'f' will be rejected for new files.")
 
         new_entries: List[Dict] = []
         for filename in candidates:
@@ -282,10 +300,14 @@ class ConfigGenerator(ConfigGeneratorBase):
             mode_default = "r"
             while True:
                 raw = input(
-                    f"     '{filename}' ({file_type}) [d/r/m, default {mode_default}]: "
+                    f"     '{filename}' ({file_type}) [f/r/m, default {mode_default}]: "
                 ).strip().lower() or mode_default
-                if raw in ("d", "driver"):
-                    mode = "driver"
+                if raw in ("f", "foundational"):
+                    if existing_foundational:
+                        print(f"        ⚠️  A foundational source already exists. Choose r or m.")
+                        continue
+                    mode = "foundational"
+                    existing_foundational = True  # claim it for subsequent prompts
                     break
                 if raw in ("r", "refiner"):
                     mode = "refiner"
@@ -293,7 +315,13 @@ class ConfigGenerator(ConfigGeneratorBase):
                 if raw in ("m", "mapper"):
                     mode = "mapper"
                     break
-                print(f"        ⚠️  Enter d, r, or m")
+                if raw in ("d", "driver"):
+                    # Quietly accepted for backward-compat with muscle memory;
+                    # driver is deprecated and a no-op when foundational is set.
+                    print(f"        ℹ️  driver is deprecated; treating as refiner.")
+                    mode = "refiner"
+                    break
+                print(f"        ⚠️  Enter f, r, or m")
 
             new_entries.append({
                 "file":            filename,
