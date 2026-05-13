@@ -15,15 +15,16 @@ Flow:
 Processing modes:
   - foundational : This source IS the CDM — promoted directly to foundational
                    (anchored mode).  At most one source per pipeline; when
-                   present, Step 2's foundational build prompt is skipped.
-  - refiner      : Source data feeds Step 2's foundational build prompt; in
-                   anchored mode, may also propose attribute-only additions
-                   in Step 5 match.
+                   present, Step 2's foundational build prompt is skipped
+                   and driver-mode sources become no-ops.
+  - driver       : Synthesized-mode "shaper" — extracted as a structural
+                   scaffold via build_ancillary_prefoundation, then injected
+                   into the Step 2 foundational build prompt as authoritative
+                   structure.  Use when a source defines target system shape.
+  - refiner      : Source data feeds Step 2's foundational build prompt
+                   alongside other refiners; in anchored mode, may also
+                   propose attribute-only additions in Step 5 match.
   - mapper       : Source-to-target lineage only — never shapes the CDM.
-  - driver       : DEPRECATED.  Historical "prefoundation scaffold" mode;
-                   silently ignored when a foundational source exists.  No
-                   longer offered as a choice for new files (kept for
-                   backward-compatible config loading).
 """
 
 import re
@@ -44,16 +45,18 @@ FILE_TYPES = [
 ]
 
 # Processing mode choices.  'foundational' is the singleton anchored-CDM
-# mode (at most one across all sources).  'driver' is deprecated and no
-# longer offered as a new choice but still accepted from legacy configs.
+# mode (at most one across all sources).  'driver' adds a structural
+# scaffold pre-pass that biases the synthesis; in anchored mode it's a
+# no-op because the synthesis prompt doesn't run.
 PROCESSING_MODES = [
     ("foundational", "Foundational — this source IS the CDM (anchored mode; at most one)"),
+    ("driver", "Driver — scaffold the foundational synthesis with this source's structure"),
     ("refiner", "Refiner — feeds foundational synthesis; may fill attribute gaps in anchored mode"),
     ("mapper", "Mapper — map to CDM for lineage only (no CDM changes)"),
 ]
 
-# Modes accepted on config load (includes deprecated 'driver' for backward compat).
-ACCEPTED_MODES = {"foundational", "refiner", "mapper", "driver"}
+# Modes accepted on config load.
+ACCEPTED_MODES = {"foundational", "driver", "refiner", "mapper"}
 
 
 def _prompt_choice(label: str, choices: List[tuple], default_idx: int = 0) -> str:
