@@ -164,7 +164,13 @@ def promote_file(
     outdir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     domain_safe = domain.lower().replace(" ", "_")
-    out_path = outdir / f"cdm_foundational_{domain_safe}_{timestamp}.json"
+    # Naming convention is cdm_{domain}_{module}_{ts}.json so that
+    # find_latest_foundational_cdm's glob (`cdm_{domain}_*.json`) picks
+    # this file up.  The earlier `cdm_foundational_{domain}_*` form was
+    # silently invisible to discovery, causing Step 5 to fall back to
+    # whatever older `cdm_{domain}_*` file was lying around in the
+    # directory.
+    out_path = outdir / f"cdm_{domain_safe}_foundational_{timestamp}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(cdm, f, indent=2)
     return out_path
