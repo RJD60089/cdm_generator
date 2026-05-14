@@ -415,8 +415,8 @@ Examples:
 
   # Unattended end-to-end (kicks off Steps 1–6, returns when done)
   python cdm_orchestrator.py plan --auto
-  python cdm_orchestrator.py plan --auto --workers 16 --gap-threshold 0.8
-  python cdm_orchestrator.py plan --auto --steps 5,6 --reject-all-gaps
+  python cdm_orchestrator.py plan --auto --workers 16
+  python cdm_orchestrator.py plan --auto --steps 5,6
         """
     )
 
