@@ -187,17 +187,33 @@ class CDMExtractor:
         return results
     
     def get_relationships(self) -> List[RelationshipDetail]:
-        """Get all FK relationships."""
+        """Get all FK relationships.
+
+        Accepts both the legacy relationship field names (to / fk / type /
+        to_column) and the current rationalizer schema (related_entity /
+        fk_attribute / relationship_type / cardinality).  Without this
+        fallback the Excel Relationships tab rendered empty whenever the
+        relationships came from the enhanced ancillary rationalizer or
+        the promoted foundational CDM.
+        """
         results = []
         for entity in self._entities:
             child_entity = entity.get("entity_name", "")
             for rel in entity.get("relationships", []):
+                parent_entity = rel.get("related_entity") or rel.get("to") or ""
+                foreign_key = rel.get("fk_attribute") or rel.get("fk") or ""
+                rel_type = (
+                    rel.get("relationship_type")
+                    or rel.get("cardinality")
+                    or rel.get("type")
+                    or "N:1"
+                )
                 results.append(RelationshipDetail(
-                    parent_entity=rel.get("to", ""),
-                    parent_key=rel.get("to_column", rel.get("fk", "")),
+                    parent_entity=parent_entity,
+                    parent_key=rel.get("to_column") or foreign_key,
                     child_entity=child_entity,
-                    foreign_key=rel.get("fk", ""),
-                    relationship_type=rel.get("type", "N:1"),
+                    foreign_key=foreign_key,
+                    relationship_type=rel_type,
                     description=rel.get("description", "")
                 ))
         return results
