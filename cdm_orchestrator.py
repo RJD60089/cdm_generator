@@ -334,7 +334,7 @@ def run_auto(
         if config.has_glue():       source_types.append("glue")
         if config.has_edw():        source_types.append("edw")
         if config.has_ancillary():
-            for anc in config.input_files.ancillary or []:
+            for anc in config.ancillary or []:
                 sid = anc.get("source_id")
                 if sid:
                     source_types.append(sid)
